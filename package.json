@@ -1,0 +1,19 @@
+{
+  "name": "workbuddy-tools-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "tauri": "tauri",
+    "ui:dev": "npm run dev --prefix ui",
+    "ui:build": "npm run build --prefix ui && node scripts/copy-ui-dist.mjs",
+    "dev:desktop": "powershell -ExecutionPolicy Bypass -File scripts/dev_desktop.ps1",
+    "build:desktop": "tauri build --no-bundle",
+    "build:desktop:installer": "tauri build",
+    "build:portable": "powershell -ExecutionPolicy Bypass -File scripts/build_portable.ps1",
+    "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build_sidecar.ps1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}
+

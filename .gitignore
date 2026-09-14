@@ -1,0 +1,48 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+sidecar.spec
+build/
+dist/
+
+# node
+node_modules/
+ui/dist/
+.vite/
+
+# tauri / rust
+src-tauri/target/
+src-tauri/dist/
+src-tauri/binaries/
+.toolchain/
+target/
+
+# local release artifacts
+release/
+
+# os / ide
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local / private
+*.log
+.env
+.env.*
+docs/logo/source/
+docs/logo/concept-*
+docs/logo/workbuddy-*
+docs/logo/workbuddy-tools-*
+docs/compose/
+frontend/
+tests/
+scripts/gen_icons.py
+scripts/make_logo_1to1.py
+src-tauri/gen/
+docs/images/*.local.png
