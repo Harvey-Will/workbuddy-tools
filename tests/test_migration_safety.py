@@ -476,10 +476,18 @@ class TestMigrationBlocks(SafetyCase):
         self.assertTrue(result["ok"], result)
         statuses = {r["key"]: r["status"] for r in result["results"]}
         self.assertEqual(statuses.get("sessions"), "success")
+        self.assertEqual(statuses.get("session_usage"), "success")
         conn = sqlite3.connect(str(self.home / ".workbuddy" / "workbuddy.db"))
         n = conn.execute("SELECT COUNT(*) FROM sessions WHERE user_id=?", (UID_A,)).fetchone()[0]
         conn.close()
         self.assertEqual(n, 2)
+        tconn = sqlite3.connect(str(self.home / ".workbuddy-ai" / "workbuddy.db"))
+        usage_count = tconn.execute(
+            "SELECT COUNT(*) FROM session_usage WHERE session_id IN (?, ?)",
+            ("sess-a1", "sess-a2"),
+        ).fetchone()[0]
+        tconn.close()
+        self.assertEqual(usage_count, 2)
 
     def test_malformed_target_mcp_blocked_preflight(self):
         self.dual_edition()
