@@ -52,8 +52,7 @@ fn sidecar_hash(bytes: &[u8]) -> u64 {
 
 /// Embedded API sidecar (built by scripts/build_sidecar.ps1).
 #[cfg(target_os = "windows")]
-static SIDECAR_BYTES: &[u8] =
-    include_bytes!("../binaries/sidecar-x86_64-pc-windows-msvc.exe");
+static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-x86_64-pc-windows-msvc.exe");
 
 fn hide_console(cmd: &mut std::process::Command) {
     #[cfg(target_os = "windows")]
@@ -197,7 +196,10 @@ fn api_proxy(req: ApiRequest) -> Result<ApiResponse, String> {
         .ok_or_else(|| "bad http response".to_string())?;
     let header = &raw[..split];
     let mut resp_body = raw[split + 4..].to_string();
-    if header.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    if header
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         resp_body = dechunk(&resp_body);
     }
     let status = header
