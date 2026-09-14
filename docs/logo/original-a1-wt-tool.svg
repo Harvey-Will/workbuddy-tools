@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- A1: WT monogram tile — abstract W + integrated wrench notch -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#g)"/>
+  <!-- geometric W -->
+  <path fill="#fff" d="M48 72h28l18 72 22-72h24l22 72 18-72h28L168 184h-32l-14-52-14 52H76L48 72z"/>
+  <!-- wrench bar under W -->
+  <g transform="translate(72 196)">
+    <rect x="18" y="0" width="84" height="14" rx="7" fill="#34D399"/>
+    <circle cx="14" cy="7" r="14" fill="none" stroke="#34D399" stroke-width="10"/>
+    <rect x="96" y="-2" width="10" height="18" rx="3" fill="#34D399"/>
+  </g>
+</svg>

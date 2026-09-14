@@ -1,0 +1,39 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+sidecar.spec
+build/
+dist/
+
+# node
+node_modules/
+ui/dist/
+.vite/
+
+# tauri / rust
+src-tauri/target/
+src-tauri/dist/
+src-tauri/binaries/
+.toolchain/
+target/
+
+# local release artifacts
+release/
+
+# os / ide
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local / private
+*.log
+.env
+.env.*
+docs/logo/source/
+docs/images/*.local.png
