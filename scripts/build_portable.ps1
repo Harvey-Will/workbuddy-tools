@@ -1,12 +1,12 @@
-# Build portable folder: exe + sidecar, no installer required
+# Build single-file portable exe (sidecar embedded, extracted to temp on launch)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-Get-Process workbuddy-tools,sidecar -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process workbuddy-tools,sidecar,api-sidecar -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
 
-# Ensure sidecar exists
+# Ensure sidecar exists (embedded via include_bytes!)
 $sidecarSrc = Join-Path $root "src-tauri\binaries\sidecar-x86_64-pc-windows-msvc.exe"
 if (-not (Test-Path $sidecarSrc)) {
   Write-Host "Building sidecar..."
@@ -30,7 +30,7 @@ if (Test-Path $portable) { Remove-Item $portable -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $portable | Out-Null
 
 Copy-Item (Join-Path $root "src-tauri\target\release\workbuddy-tools.exe") $portable -Force
-Copy-Item $sidecarSrc (Join-Path $portable "sidecar-x86_64-pc-windows-msvc.exe") -Force
+# sidecar is embedded; do not ship a second exe
 
 # zip
 $zip = Join-Path $root "release\WorkBuddyTools-portable-win64.zip"

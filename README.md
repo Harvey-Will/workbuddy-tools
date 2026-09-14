@@ -82,10 +82,10 @@
 从 [Releases](../../releases) 下载 `WorkBuddyTools-portable-win64.zip`：
 
 1. 解压到任意目录  
-2. 双击 `workbuddy-tools.exe`  
-3. 首次启动会拉起内置服务，约数秒  
+2. 双击 **单个** `workbuddy-tools.exe`  
+3. 首次启动会在临时目录释放内置 API（无额外黑窗）  
 
-**无需安装 Python / Node。**
+**单文件分发，无需安装 Python / Node。**
 
 ### 选项 B：安装包
 

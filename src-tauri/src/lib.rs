@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tauri::Manager;
-use tauri_plugin_shell::ShellExt;
 
 fn api_healthy() -> bool {
     std::net::TcpStream::connect(("127.0.0.1", 18765)).is_ok()
@@ -15,94 +15,87 @@ fn wait_api() {
     }
 }
 
-fn portable_sidecar_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let name = if cfg!(windows) {
-        "sidecar-x86_64-pc-windows-msvc.exe"
-    } else {
-        "sidecar-x86_64-unknown-linux-gnu"
-    };
-    let p = dir.join(name);
-    if p.is_file() {
-        return Some(p);
+/// Embedded API sidecar (built by scripts/build_sidecar.ps1).
+#[cfg(target_os = "windows")]
+static SIDECAR_BYTES: &[u8] =
+    include_bytes!("../binaries/sidecar-x86_64-pc-windows-msvc.exe");
+
+fn hide_console(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    // also try simple name
-    let simple = if cfg!(windows) {
-        dir.join("sidecar.exe")
-    } else {
-        dir.join("sidecar")
-    };
-    if simple.is_file() {
-        return Some(simple);
-    }
-    None
+    let _ = cmd;
 }
 
-fn spawn_portable_sidecar() -> bool {
-    let Some(path) = portable_sidecar_path() else {
-        return false;
-    };
-    eprintln!("[sidecar] portable spawn {}", path.display());
-    match std::process::Command::new(&path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+/// Extract embedded sidecar to a per-version temp path and return it.
+fn extract_embedded_sidecar() -> Option<PathBuf> {
+    #[cfg(not(target_os = "windows"))]
     {
+        None
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let dir = std::env::temp_dir().join("workbuddy-tools").join("1.0.0");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("api-sidecar.exe");
+        // Skip rewrite if same size (fast path)
+        let need = match std::fs::metadata(&path) {
+            Ok(m) => m.len() != SIDECAR_BYTES.len() as u64,
+            Err(_) => true,
+        };
+        if need {
+            std::fs::write(&path, SIDECAR_BYTES).ok()?;
+        }
+        Some(path)
+    }
+}
+
+fn spawn_sidecar_exe(path: &std::path::Path) -> bool {
+    let mut cmd = std::process::Command::new(path);
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    hide_console(&mut cmd);
+    match cmd.spawn() {
         Ok(_child) => {
             wait_api();
             api_healthy()
         }
         Err(e) => {
-            eprintln!("[sidecar] portable spawn failed: {e}");
+            eprintln!("[sidecar] spawn failed: {e}");
             false
         }
     }
 }
 
-fn spawn_bundled_sidecar(app: &tauri::AppHandle) -> bool {
-    let sidecar = app.shell().sidecar("sidecar");
-    match sidecar {
-        Ok(cmd) => match cmd.spawn() {
-            Ok((mut rx, _child)) => {
-                tauri::async_runtime::spawn(async move {
-                    while let Some(event) = rx.recv().await {
-                        if let tauri_plugin_shell::process::CommandEvent::Stderr(line) = event {
-                            eprintln!("[sidecar] {}", String::from_utf8_lossy(&line));
-                        }
-                    }
-                });
-                wait_api();
-                api_healthy()
-            }
-            Err(e) => {
-                eprintln!("[sidecar] spawn bundled failed: {e}");
-                false
-            }
-        },
-        Err(e) => {
-            eprintln!("[sidecar] resolve bundled failed: {e}");
-            false
-        }
-    }
-}
-
-fn start_sidecar(app: &tauri::AppHandle) {
+fn start_sidecar() {
     if api_healthy() {
-        eprintln!("[sidecar] API already listening");
+        eprintln!("[sidecar] already listening");
         return;
     }
-    // 1) 便携版：与主 exe 同目录
-    if spawn_portable_sidecar() {
-        eprintln!("[sidecar] portable API ready");
-        return;
+    // 1) single-exe: extract embedded sidecar
+    if let Some(path) = extract_embedded_sidecar() {
+        eprintln!("[sidecar] extract {}", path.display());
+        if spawn_sidecar_exe(&path) {
+            eprintln!("[sidecar] embedded API ready");
+            return;
+        }
     }
-    // 2) 安装版：Tauri externalBin
-    if spawn_bundled_sidecar(app) {
-        eprintln!("[sidecar] bundled API ready");
-        return;
+    // 2) fallback: file next to exe (dev / split portable)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["sidecar-x86_64-pc-windows-msvc.exe", "sidecar.exe"] {
+                let p = dir.join(name);
+                if p.is_file() && spawn_sidecar_exe(&p) {
+                    eprintln!("[sidecar] sidecar file ready");
+                    return;
+                }
+            }
+        }
     }
-    eprintln!("[sidecar] all spawn strategies failed");
+    eprintln!("[sidecar] all strategies failed");
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,9 +130,8 @@ fn api_proxy(req: ApiRequest) -> Result<ApiResponse, String> {
         .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .ok();
     let body = req.body.unwrap_or_default();
-    let mut head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nConnection: close\r\n"
-    );
+    let mut head =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nConnection: close\r\n");
     if !body.is_empty() {
         head.push_str("Content-Type: application/json\r\n");
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));
@@ -208,11 +200,9 @@ fn dechunk(input: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![api_proxy])
         .setup(|app| {
-            let handle = app.handle().clone();
-            start_sidecar(&handle);
+            start_sidecar();
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("WorkBuddy Tools");
             }
