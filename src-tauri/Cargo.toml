@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "workbuddy-tools"
-version = "1.0.0"
+version = "0.1.0"
 description = "WorkBuddy Tools desktop"
 authors = ["you"]
 edition = "2021"
@@ -25,3 +25,4 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
