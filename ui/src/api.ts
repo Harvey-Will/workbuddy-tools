@@ -43,6 +43,15 @@ export interface MigratePlanItem {
   note?: string;
 }
 
+export type MigrateItemStatus = "success" | "skipped" | "failed";
+
+export interface MigrateItemResult {
+  key: string;
+  status: MigrateItemStatus;
+  detail: string;
+  count: number;
+}
+
 export interface MigratePlan {
   from_edition: string;
   to_edition: string;
@@ -51,6 +60,20 @@ export interface MigratePlan {
   client_running: boolean;
   items: MigratePlanItem[];
   default_items: Record<string, boolean>;
+  blocked?: boolean;
+  block_reason?: string;
+  blocked_item_keys?: string[];
+  same_edition?: boolean;
+  same_account?: boolean;
+  warnings?: string[];
+}
+
+export interface MigrateRunResult {
+  ok: boolean;
+  status?: string;
+  warnings?: string[];
+  results?: MigrateItemResult[];
+  need_restart?: boolean;
 }
 
 export interface TokenSummary {
@@ -237,12 +260,7 @@ export const api = {
     target_uid?: string;
     items: Record<string, boolean>;
   }) =>
-    request<{
-      ok: boolean;
-      warnings: string[];
-      results: Array<{ key: string; ok: boolean; detail: string; count: number }>;
-      need_restart: boolean;
-    }>("/api/migrate/run", {
+    request<MigrateRunResult>("/api/migrate/run", {
       method: "POST",
       body: JSON.stringify({ ...body, mode: "copy" }),
     }),

@@ -33,8 +33,18 @@ from core.editions import (
     make_paths,
     normalize_edition,
 )
+from core.safety import (
+    AccountNotFound,
+    ClientRunningError,
+    InvalidUID,
+    MigrationBlocked,
+    SafetyError,
+    SchemaIncompatible,
+    UnsafePath,
+    WriteConflict,
+)
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
 # Optional loopback auth token (set by desktop shell). Empty = open (dev/CLI).
@@ -149,26 +159,45 @@ def api_current(edition: str = Query(...)) -> Dict[str, Any]:
     }
 
 
+def _map_safety(e: SafetyError) -> HTTPException:
+    status = 400
+    if isinstance(e, ClientRunningError):
+        status = 409
+    elif isinstance(e, AccountNotFound):
+        status = 404
+    elif isinstance(e, WriteConflict):
+        status = 409
+    elif isinstance(e, SchemaIncompatible):
+        status = 409
+    elif isinstance(e, MigrationBlocked):
+        status = 409
+    elif isinstance(e, UnsafePath):
+        status = 400
+    elif isinstance(e, InvalidUID):
+        status = 400
+    return HTTPException(status_code=status, detail={"code": e.code, "message": e.message})
+
+
 @app.post("/api/accounts/switch")
 def api_switch(body: SwitchBody) -> Dict[str, Any]:
     ed = _norm(body.edition)
-    uid = (body.target_uid or "").strip()
-    if not uid or len(uid) > 128 or any(c in uid for c in "/\\"):
-        raise HTTPException(status_code=400, detail={"code": "uid_required", "message": "invalid target_uid"})
     try:
-        return accounts_mod.switch_account(ed, uid)
+        return accounts_mod.switch_account(ed, body.target_uid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": "edition not found"})
+    except SafetyError as e:
+        raise _map_safety(e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": "uid_required", "message": str(e)})
 
 
 @app.post("/api/accounts/add")
 def api_add_profile(body: AddProfileBody) -> Dict[str, Any]:
     ed = _norm(body.edition)
-    uid = (body.uid or "").strip()
-    if not uid or len(uid) > 128 or any(c in uid for c in "/\\"):
-        raise HTTPException(status_code=400, detail={"code": "uid_required", "message": "invalid uid"})
     try:
-        item = accounts_mod.add_profile(ed, uid, body.label[:80])
+        item = accounts_mod.add_profile(ed, body.uid, body.label[:80])
+    except SafetyError as e:
+        raise _map_safety(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": "uid_required", "message": str(e)})
     return {"ok": True, "profile": item, "note": "已保存，请在客户端登录后刷新"}
@@ -177,11 +206,10 @@ def api_add_profile(body: AddProfileBody) -> Dict[str, Any]:
 @app.post("/api/accounts/rename")
 def api_rename(body: RenameAccountBody) -> Dict[str, Any]:
     ed = _norm(body.edition)
-    uid = (body.uid or "").strip()
-    if not uid or len(uid) > 128 or any(c in uid for c in "/\\"):
-        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "invalid uid"})
     try:
-        return accounts_mod.set_account_label(ed, uid, body.label[:80])
+        return accounts_mod.set_account_label(ed, body.uid, body.label[:80])
+    except SafetyError as e:
+        raise _map_safety(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": "bad_request", "message": str(e)})
 
@@ -218,9 +246,10 @@ def api_migrate_plan(
     target_uid: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
     fe, te = _norm(from_edition), _norm(to_edition)
-    if not source_uid or len(source_uid) > 128:
-        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "invalid source_uid"})
-    return migrate_mod.plan_migrate(fe, te, source_uid, target_uid)
+    try:
+        return migrate_mod.plan_migrate(fe, te, source_uid, target_uid)
+    except SafetyError as e:
+        raise _map_safety(e)
 
 
 @app.post("/api/migrate/run")
@@ -228,8 +257,6 @@ def api_migrate_run(body: MigrateRunBody) -> Dict[str, Any]:
     fe, te = _norm(body.from_edition), _norm(body.to_edition)
     if body.mode not in ("copy",):
         raise HTTPException(status_code=400, detail={"code": "bad_mode", "message": "v0.1 仅支持 copy"})
-    if not body.source_uid or len(body.source_uid) > 128:
-        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "invalid source_uid"})
     payload = {
         "from_edition": fe,
         "to_edition": te,
@@ -244,6 +271,8 @@ def api_migrate_run(body: MigrateRunBody) -> Dict[str, Any]:
         )
     try:
         return migrate_mod.run_migrate(payload)
+    except SafetyError as e:
+        raise _map_safety(e)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": "migrate_failed", "message": str(e)})
     finally:

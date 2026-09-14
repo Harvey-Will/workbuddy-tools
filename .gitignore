@@ -41,7 +41,6 @@ docs/logo/workbuddy-*
 docs/logo/workbuddy-tools-*
 docs/compose/
 frontend/
-tests/
 scripts/gen_icons.py
 scripts/make_logo_1to1.py
 src-tauri/gen/

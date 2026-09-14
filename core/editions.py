@@ -53,8 +53,16 @@ def normalize_edition(edition: str) -> str:
     return key
 
 
+def data_home() -> Path:
+    """Override for tests/sandbox so tools never touch the real user home."""
+    override = os.environ.get("WBT_DATA_HOME", "").strip()
+    if override:
+        return Path(override)
+    return Path.home()
+
+
 def edition_root(edition: str) -> Path:
-    return Path.home() / EDITION_DEFS[normalize_edition(edition)]["dir_name"]
+    return data_home() / EDITION_DEFS[normalize_edition(edition)]["dir_name"]
 
 
 @dataclass(frozen=True)

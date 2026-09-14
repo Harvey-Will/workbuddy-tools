@@ -72,7 +72,7 @@ fn extract_embedded_sidecar() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        let dir = std::env::temp_dir().join("workbuddy-tools").join("0.1.0");
+        let dir = std::env::temp_dir().join("workbuddy-tools").join("0.1.1");
         std::fs::create_dir_all(&dir).ok()?;
         let path = dir.join("api-sidecar.exe");
         let want = format!("{:016x}", sidecar_hash(SIDECAR_BYTES));
