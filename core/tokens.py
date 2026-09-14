@@ -99,12 +99,6 @@ def iter_token_events(paths: AppPaths) -> Iterable[TokenEvent]:
                     usage = _extract_usage(obj)
                     if not usage:
                         continue
-                    # only count assistant-like rows with real tokens
-                    role = obj.get("role")
-                    if role and role not in ("assistant", "model", "ai"):
-                        # still accept if usage present and type looks like message
-                        if obj.get("type") not in (None, "message", "assistant", "tool_use", "tool-result"):
-                            pass
                     ts = _parse_ts(obj.get("timestamp")) or _parse_ts(obj.get("ts"))
                     if ts is None:
                         continue

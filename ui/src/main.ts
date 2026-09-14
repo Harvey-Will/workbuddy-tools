@@ -88,6 +88,10 @@ function toast(msg: string): void {
   }, 2800);
 }
 
+function safeColor(c: string): string {
+  return /^#[0-9A-Fa-f]{3,8}$/.test(c || "") ? c : "#4F46E5";
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -538,7 +542,7 @@ function renderBar(data: TokenSummary): void {
     (d.by_model || []).forEach((m) => {
       const h = ((m.total || 0) / max) * innerH;
       const y = padT + innerH - h;
-      bars += `<rect x="${x0}" y="${y}" width="${barW}" height="${Math.max(h, 1)}" rx="3" fill="${m.color}"><title>${d.date} ${m.model} ${fmtNum(m.total)}</title></rect>`;
+      bars += `<rect x="${x0}" y="${y}" width="${barW}" height="${Math.max(h, 1)}" rx="3" fill="${safeColor(m.color)}"><title>${d.date} ${escapeHtml(m.model)} ${fmtNum(m.total)}</title></rect>`;
       x0 += barW + 2;
     });
   });
@@ -579,9 +583,9 @@ function renderPie(data: TokenSummary): void {
     const x2 = cx + r * Math.cos(angle + sweep);
     const y2 = cy + r * Math.sin(angle + sweep);
     const large = sweep > Math.PI ? 1 : 0;
-    if (frac > 0.999) paths += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${m.color}"/>`;
+    if (frac > 0.999) paths += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${safeColor(m.color)}"/>`;
     else
-      paths += `<path d="M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z" fill="${m.color}"><title>${m.model}</title></path>`;
+      paths += `<path d="M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} Z" fill="${safeColor(m.color)}"><title>${escapeHtml(m.model)}</title></path>`;
     angle += sweep;
   });
   paths += `<circle cx="${cx}" cy="${cy}" r="48" fill="#fff"/>`;
@@ -592,7 +596,7 @@ function renderPie(data: TokenSummary): void {
     .slice(0, 12)
     .map(
       (m) =>
-        `<div class="legend-item"><span class="swatch" style="background:${m.color}"></span>${escapeHtml(m.model)} · ${fmtNum(m.total)}</div>`,
+        `<div class="legend-item"><span class="swatch" style="background:${safeColor(m.color)}"></span>${escapeHtml(m.model)} · ${fmtNum(m.total)}</div>`,
     )
     .join("");
 }

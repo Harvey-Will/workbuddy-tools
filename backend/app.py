@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
+"""Local HTTP API for WorkBuddy Tools (loopback)."""
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import sys
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -30,9 +34,29 @@ from core.editions import (
     normalize_edition,
 )
 
-app = FastAPI(title="WorkBuddy Tools", version="1.0.0")
+APP_VERSION = "0.1.0"
+app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
-FRONTEND = ROOT / "frontend"
+# Optional loopback auth token (set by desktop shell). Empty = open (dev/CLI).
+API_TOKEN = os.environ.get("WBT_TOKEN", "").strip()
+_migrate_lock = threading.Lock()
+
+
+def _check_token(x_wbt_token: Optional[str]) -> None:
+    if not API_TOKEN:
+        return
+    if not x_wbt_token or not secrets.compare_digest(x_wbt_token, API_TOKEN):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "unauthorized", "message": "invalid or missing API token"},
+        )
+
+
+def _norm(edition: str) -> str:
+    try:
+        return normalize_edition(edition)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": "bad_edition", "message": str(e)})
 
 
 class SwitchBody(BaseModel):
@@ -65,16 +89,20 @@ class MigrateRunBody(BaseModel):
     mode: str = "copy"
 
 
-def _norm(edition: str) -> str:
-    try:
-        return normalize_edition(edition)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "bad_edition", "message": str(e)})
+@app.middleware("http")
+async def require_token(request, call_next):
+    if request.url.path.startswith("/api/"):
+        token = request.headers.get("x-wbt-token")
+        try:
+            _check_token(token)
+        except HTTPException as e:
+            return JSONResponse(status_code=e.status_code, content=e.detail)
+    return await call_next(request)
 
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "editions": detect_editions()}
+    return {"ok": True, "version": APP_VERSION, "editions": detect_editions(), "auth": bool(API_TOKEN)}
 
 
 @app.get("/api/editions")
@@ -84,7 +112,8 @@ def api_editions() -> Dict[str, Any]:
     for e in items:
         d = e.to_dict()
         d["client_running"] = client_looks_running(e.key) if e.exists else False
-        d["client_binaries"] = find_client_executables(e.key) if e.exists else []
+        # Do not leak full local binary paths in list API
+        d["client_binaries"] = [Path(p).name for p in (find_client_executables(e.key) if e.exists else [])]
         enriched.append(d)
     return {"editions": enriched}
 
@@ -92,15 +121,15 @@ def api_editions() -> Dict[str, Any]:
 @app.get("/api/accounts")
 def api_accounts(edition: str = Query(...)) -> Dict[str, Any]:
     ed = _norm(edition)
-    root = make_paths(ed).root
-    if not root.exists():
-        raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": str(root)})
+    paths = make_paths(ed)
+    if not paths.root.exists():
+        raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": "data directory not found"})
     accounts = [a.to_dict() for a in accounts_mod.list_accounts(ed)]
     profiles = accounts_mod.load_profiles(ed)
-    snap = accounts_mod.read_account_snapshot(make_paths(ed))
+    snap = accounts_mod.read_account_snapshot(paths)
     return {
         "edition": ed,
-        "current_uid": snap.get("uid") or accounts_mod.get_current_uid(make_paths(ed)),
+        "current_uid": snap.get("uid") or accounts_mod.get_current_uid(paths),
         "accounts": accounts,
         "profiles": profiles,
         "client_running": client_looks_running(ed),
@@ -123,19 +152,23 @@ def api_current(edition: str = Query(...)) -> Dict[str, Any]:
 @app.post("/api/accounts/switch")
 def api_switch(body: SwitchBody) -> Dict[str, Any]:
     ed = _norm(body.edition)
-    if not body.target_uid:
-        raise HTTPException(status_code=400, detail={"code": "uid_required", "message": "target_uid required"})
+    uid = (body.target_uid or "").strip()
+    if not uid or len(uid) > 128 or any(c in uid for c in "/\\"):
+        raise HTTPException(status_code=400, detail={"code": "uid_required", "message": "invalid target_uid"})
     try:
-        return accounts_mod.switch_account(ed, body.target_uid)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": str(e)})
+        return accounts_mod.switch_account(ed, uid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": "edition not found"})
 
 
 @app.post("/api/accounts/add")
 def api_add_profile(body: AddProfileBody) -> Dict[str, Any]:
     ed = _norm(body.edition)
+    uid = (body.uid or "").strip()
+    if not uid or len(uid) > 128 or any(c in uid for c in "/\\"):
+        raise HTTPException(status_code=400, detail={"code": "uid_required", "message": "invalid uid"})
     try:
-        item = accounts_mod.add_profile(ed, body.uid, body.label)
+        item = accounts_mod.add_profile(ed, uid, body.label[:80])
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": "uid_required", "message": str(e)})
     return {"ok": True, "profile": item, "note": "已保存，请在客户端登录后刷新"}
@@ -144,8 +177,11 @@ def api_add_profile(body: AddProfileBody) -> Dict[str, Any]:
 @app.post("/api/accounts/rename")
 def api_rename(body: RenameAccountBody) -> Dict[str, Any]:
     ed = _norm(body.edition)
+    uid = (body.uid or "").strip()
+    if not uid or len(uid) > 128 or any(c in uid for c in "/\\"):
+        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "invalid uid"})
     try:
-        return accounts_mod.set_account_label(ed, body.uid, body.label)
+        return accounts_mod.set_account_label(ed, uid, body.label[:80])
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": "bad_request", "message": str(e)})
 
@@ -157,19 +193,20 @@ def api_open_client(body: OpenClientBody) -> Dict[str, Any]:
     if not bins:
         raise HTTPException(
             status_code=404,
-            detail={"code": "client_not_found", "message": "未找到客户端可执行文件，请手动打开 WorkBuddy / WorkBuddyAI"},
+            detail={"code": "client_not_found", "message": "未找到客户端，请手动打开 WorkBuddy / WorkBuddyAI"},
         )
     exe = bins[0]
     try:
         subprocess.Popen([exe], cwd=str(Path(exe).parent), start_new_session=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": "launch_failed", "message": str(e)})
-    return {"ok": True, "exe": exe, "candidates": bins}
+    return {"ok": True, "exe": Path(exe).name, "candidates": [Path(p).name for p in bins]}
 
 
 @app.get("/api/workspaces")
 def api_workspaces(edition: str = Query(...)) -> Dict[str, Any]:
     ed = _norm(edition)
+    # Return cwd as-is (needed by user); paths stay local to this machine.
     return {"edition": ed, "workspaces": migrate_mod.list_workspaces(ed)}
 
 
@@ -181,6 +218,8 @@ def api_migrate_plan(
     target_uid: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
     fe, te = _norm(from_edition), _norm(to_edition)
+    if not source_uid or len(source_uid) > 128:
+        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "invalid source_uid"})
     return migrate_mod.plan_migrate(fe, te, source_uid, target_uid)
 
 
@@ -188,7 +227,9 @@ def api_migrate_plan(
 def api_migrate_run(body: MigrateRunBody) -> Dict[str, Any]:
     fe, te = _norm(body.from_edition), _norm(body.to_edition)
     if body.mode not in ("copy",):
-        raise HTTPException(status_code=400, detail={"code": "bad_mode", "message": "v1 仅支持 copy"})
+        raise HTTPException(status_code=400, detail={"code": "bad_mode", "message": "v0.1 仅支持 copy"})
+    if not body.source_uid or len(body.source_uid) > 128:
+        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "invalid source_uid"})
     payload = {
         "from_edition": fe,
         "to_edition": te,
@@ -196,10 +237,17 @@ def api_migrate_run(body: MigrateRunBody) -> Dict[str, Any]:
         "target_uid": body.target_uid,
         "items": body.items,
     }
+    if not _migrate_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "busy", "message": "已有迁移在进行中，请稍后再试"},
+        )
     try:
         return migrate_mod.run_migrate(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": "migrate_failed", "message": str(e)})
+    finally:
+        _migrate_lock.release()
 
 
 @app.get("/api/tokens/summary")
@@ -216,19 +264,19 @@ def api_tokens(
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(FRONTEND / "index.html")
-
-
-if FRONTEND.exists():
-    app.mount("/static", StaticFiles(directory=str(FRONTEND)), name="static")
+def index():
+    # Prefer packaged ui/dist (desktop); fall back to legacy frontend/
+    for cand in (ROOT / "ui" / "dist" / "index.html", ROOT / "frontend" / "index.html"):
+        if cand.is_file():
+            return FileResponse(cand)
+    raise HTTPException(status_code=404, detail={"code": "no_ui", "message": "UI not packaged"})
 
 
 def main() -> None:
     import uvicorn
 
-    host = os.environ.get("WBT_HOST", "127.0.0.1")
-    port = int(os.environ.get("WBT_PORT", "18765"))
+    host = "127.0.0.1"
+    port = int(os.environ.get("WBT_PORT") or "18765")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 

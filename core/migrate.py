@@ -179,9 +179,9 @@ def migrate_session_content(session_ids: List[str], source: AppPaths, target: Ap
         for sid in session_ids:
             if _copy_if_missing(src_root / f"{sid}{suffix}", dst_root / f"{sid}{suffix}"):
                 copied += 1
-    if source.blobs_dir.exists() and not target.blobs_dir.exists():
-        shutil.copytree(str(source.blobs_dir), str(target.blobs_dir))
-        copied += 1
+    if source.blobs_dir.exists():
+        # incremental; do not skip when target already has blobs/
+        copied += _merge_copy_dir(source.blobs_dir, target.blobs_dir)
     return copied
 
 
@@ -235,12 +235,40 @@ def migrate_memory(source: AppPaths, target: AppPaths, source_uid: str, target_u
         return 0, "源无 Memory"
     src_text = src.read_text(encoding="utf-8")
     dst_text = dst.read_text(encoding="utf-8") if dst.exists() else ""
-    merged = merge_memory_profile(src_text, dst_text, source_uid, target_uid)
+    if not dst_text.strip():
+        merged = _rewrite_memory_identity(src_text, source_uid, target_uid)
+    else:
+        merged = merge_memory_profile(src_text, dst_text, source_uid, target_uid)
     if merged == dst_text and dst_text:
         return 0, "无新增"
     target.memory_dir.mkdir(parents=True, exist_ok=True)
     dst.write_text(merged, encoding="utf-8")
     return len(merged), f"Memory 已写入 {len(merged)} 字符"
+
+
+def _rewrite_memory_identity(src_text: str, source_uid: str, target_uid: str) -> str:
+    """Copy source memory but stamp target uid in RAW_JSON."""
+    import re
+
+    def _sub(m):
+        try:
+            data = json.loads(m.group(1))
+            if isinstance(data, dict) and data.get("uid") == source_uid:
+                data["uid"] = target_uid
+            return (
+                "RAW_JSON_START\n"
+                + json.dumps(data, ensure_ascii=False, indent=2)
+                + "\nRAW_JSON_END"
+            )
+        except Exception:
+            return m.group(0)
+
+    return re.sub(
+        r"RAW_JSON_START\n(\{.*?\})\nRAW_JSON_END",
+        _sub,
+        src_text,
+        flags=re.S,
+    )
 
 
 def migrate_connectors(source: AppPaths, target: AppPaths, source_uid: str, target_uid: str) -> Tuple[int, str]:
@@ -468,12 +496,12 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
         backups.append(create_backup(source, source_uid, "source"))
 
     results: List[MigrateItemResult] = []
+    # Cache before UPDATE may clear source user_id mapping
     session_ids = session_ids_for_uid(source, source_uid)
 
     if items.get("sessions"):
         n, detail = migrate_sessions(source, target, source_uid, target_uid)
         results.append(MigrateItemResult("sessions", True, detail, n))
-        session_ids = session_ids_for_uid(source, source_uid) or session_ids
 
     if items.get("session_content"):
         n = migrate_session_content(session_ids, source, target)

@@ -97,6 +97,20 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+let cachedToken: string | null = null;
+
+async function apiToken(): Promise<string | null> {
+  if (!isTauri()) return null;
+  if (cachedToken !== null) return cachedToken;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    cachedToken = (await invoke<string>("get_api_token")) || "";
+  } catch {
+    cachedToken = "";
+  }
+  return cachedToken;
+}
+
 async function invokeProxy<T>(path: string, init?: RequestInit): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
   const method = (init?.method || "GET").toUpperCase();
@@ -124,10 +138,13 @@ const API_HOSTS = ["http://127.0.0.1:18765", "http://localhost:18765"];
 let activeHost: string | null = null;
 
 async function fetchWithHost(host: string, path: string, init?: RequestInit): Promise<Response> {
-  return fetch(host + path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-    ...init,
-  });
+  const token = await apiToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  if (token) headers["X-WBT-Token"] = token;
+  return fetch(host + path, { ...init, headers });
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

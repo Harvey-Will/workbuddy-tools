@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "workbuddy-tools"
 version = "0.1.0"
 description = "WorkBuddy Tools desktop"
