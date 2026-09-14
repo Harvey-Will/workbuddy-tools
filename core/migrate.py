@@ -610,6 +610,8 @@ def migrate_session_usage(source: AppPaths, target: AppPaths, session_ids: List[
         insert_cols = [c for c in cols if c in tcols]
         if "session_id" not in insert_cols:
             raise SchemaIncompatible("目标 session_usage 表结构异常，已中止")
+        # Drop surrogate PK `id` so cross-DB copies do not collide with target AUTOINCREMENT ids.
+        insert_cols = [c for c in insert_cols if c != "id"]
         col_sql = ", ".join(insert_cols)
         ph = ", ".join("?" for _ in insert_cols)
         idx = {c: cols.index(c) for c in insert_cols}
