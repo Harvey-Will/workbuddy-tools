@@ -8,9 +8,13 @@ See the [Chinese README](README.md) for the full guide (features, security, inst
 
 ## Quick start (portable)
 
-1. Download `WorkBuddyTools-portable-win64.zip` from Releases  
-2. Unzip and run `workbuddy-tools.exe`  
-3. No Python install required  
+1. Download `WorkBuddyTools-portable-win64-v0.1.1.zip` from Releases
+2. Unzip and run `workbuddy-tools.exe`
+3. No Python install required
+
+## Safety (v0.1.1)
+
+Unsafe migrations fail closed before the first disk write. Same-edition session-related migration is blocked in this version. Do not use v0.1.0 for same-edition account session migration.
 
 ## Dev
 

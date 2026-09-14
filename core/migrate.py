@@ -5,11 +5,33 @@ import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .accounts import get_current_uid
-from .editions import AppPaths, client_looks_running, make_paths
-from .models import DEFAULT_MIGRATE_ITEMS, MigrateItemResult
+from .accounts import discover_uids, get_current_uid
+from .editions import AppPaths, client_looks_running, make_paths, normalize_edition
+from .models import DEFAULT_MIGRATE_ITEMS, MigrateItemResult, MigrateStatus
+from .safety import (
+    AccountNotFound,
+    ClientRunningError,
+    MigrationBlocked,
+    SafetyError,
+    SchemaIncompatible,
+    WriteConflict,
+    atomic_write_json,
+    atomic_write_text,
+    ensure_within,
+    selected_true_items,
+    validate_uid,
+)
+
+SESSION_SCOPED_ITEMS = {
+    "sessions",
+    "session_content",
+    "tasks",
+    "session_usage",
+}
+
+KNOWN_ITEMS = tuple(DEFAULT_MIGRATE_ITEMS.keys())
 
 
 def _deep_merge(source: dict, target: dict) -> dict:
@@ -66,8 +88,136 @@ def create_backup(paths: AppPaths, target_uid: str, label: str = "migrate") -> s
         "edition": paths.edition,
         "created_at": datetime.now().isoformat(),
     }
-    (backup_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    atomic_write_json(backup_path / "meta.json", meta)
     return str(backup_path)
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> Set[str]:
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    return {r[1] for r in cur.fetchall()}
+
+
+def validate_minimum_schema(db_path: Path, items: Set[str]) -> None:
+    """Only check tables/columns that this migration will actually touch."""
+    if not items:
+        return
+    need_sessions = bool(items & {"sessions", "session_content", "tasks", "session_usage"})
+    if not db_path.exists():
+        if need_sessions or "session_usage" in items:
+            raise SchemaIncompatible("源数据库不存在")
+        return
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+        has_sessions = cur.fetchone() is not None
+        if need_sessions and not has_sessions:
+            raise SchemaIncompatible(
+                "检测到当前 WorkBuddy 数据库结构与本工具验证过的结构不兼容（缺少 sessions 表）。"
+                "为避免损坏数据，本次迁移已取消。"
+            )
+        if has_sessions and "sessions" in items:
+            cols = _table_columns(conn, "sessions")
+            if not {"id", "user_id"}.issubset(cols):
+                raise SchemaIncompatible(
+                    "检测到当前 WorkBuddy 数据库结构与本工具验证过的结构不兼容"
+                    "（sessions 缺少 id/user_id）。为避免损坏数据，本次迁移已取消。"
+                )
+        if "session_usage" in items:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='session_usage'"
+            )
+            if cur.fetchone() is None:
+                raise SchemaIncompatible(
+                    "检测到当前 WorkBuddy 数据库结构与本工具验证过的结构不兼容"
+                    "（缺少 session_usage 表）。为避免损坏数据，本次迁移已取消。"
+                )
+    finally:
+        conn.close()
+
+
+def preflight_migration(
+    from_edition: str,
+    to_edition: str,
+    source_uid: str,
+    target_uid: str,
+    selected_items: Set[str],
+) -> Dict[str, Any]:
+    """All safety checks. Must run before the first disk write."""
+    fe = normalize_edition(from_edition)
+    te = normalize_edition(to_edition)
+    source_uid = validate_uid(source_uid)
+    target_uid = validate_uid(target_uid)
+
+    source = make_paths(fe)
+    target = make_paths(te)
+
+    if not source.root.exists():
+        raise AccountNotFound("源版本数据目录不存在")
+    if not target.root.exists():
+        raise AccountNotFound("目标版本数据目录不存在")
+
+    source_uids = set(discover_uids(source))
+    target_uids = set(discover_uids(target))
+    if source_uid not in source_uids:
+        raise AccountNotFound(f"源账号不存在或未被发现: {source_uid}")
+    if target_uid not in target_uids:
+        raise AccountNotFound(f"目标账号不存在或未被发现: {target_uid}")
+
+    ensure_within(source.root, source.memory_file(source_uid))
+    ensure_within(source.root, source.connectors_user_dir(source_uid))
+    ensure_within(target.root, target.memory_file(target_uid))
+    ensure_within(target.root, target.connectors_user_dir(target_uid))
+
+    if fe == te and source_uid == target_uid:
+        raise MigrationBlocked("源账号和目标账号相同，无需执行迁移。")
+
+    if fe == te and (selected_items & SESSION_SCOPED_ITEMS):
+        raise MigrationBlocked(
+            "当前版本暂不支持同版本账号之间复制会话相关数据。"
+            "这样做需要完整 Session ID 重映射，否则可能修改或混淆源账号数据。"
+        )
+
+    if client_looks_running(fe):
+        raise ClientRunningError("源客户端正在运行，请完全退出 WorkBuddy 后再迁移。")
+    if client_looks_running(te):
+        raise ClientRunningError("目标客户端正在运行，请完全退出 WorkBuddy 后再迁移。")
+
+    if selected_items:
+        validate_minimum_schema(source.db_path, selected_items)
+        if te != fe:
+            validate_minimum_schema(target.db_path, selected_items & {"sessions", "session_usage"})
+
+    # Read-only parse checks before any write.
+    if "shared_plugins" in selected_items:
+        src_plugins = source.plugins_dir / "installed_plugins.json"
+        dst_plugins = target.plugins_dir / "installed_plugins.json"
+        if src_plugins.exists():
+            _load_installed_plugins(src_plugins, role="源")
+        if dst_plugins.exists():
+            _load_installed_plugins(dst_plugins, role="目标")
+    if "mcp_connectors" in selected_items:
+        for label, root, uid in (
+            ("源", source, source_uid),
+            ("目标", target, target_uid),
+        ):
+            mcp = root.connectors_user_dir(uid) / "mcp.json"
+            if not mcp.exists():
+                continue
+            try:
+                json.loads(mcp.read_text(encoding="utf-8"))
+            except Exception as e:
+                raise WriteConflict(f"{label} mcp.json 无法解析，已中止以保护原文件: {e}")
+
+    return {
+        "from_edition": fe,
+        "to_edition": te,
+        "source_uid": source_uid,
+        "target_uid": target_uid,
+        "selected_items": sorted(selected_items),
+        "ok": True,
+    }
 
 
 def session_ids_for_uid(paths: AppPaths, uid: str) -> List[str]:
@@ -84,10 +234,18 @@ def session_ids_for_uid(paths: AppPaths, uid: str) -> List[str]:
         return []
 
 
-def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target_uid: str) -> Tuple[int, str]:
+def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target_uid: str) -> Tuple[int, str, str]:
+    """Returns (count, detail, status)."""
     same_db = source.db_path.resolve() == target.db_path.resolve()
     if not source.db_path.exists():
-        return 0, "源数据库不存在"
+        return 0, "源数据库不存在", MigrateStatus.SKIPPED
+    if same_db:
+        # v0.1.1: never reassign session ownership inside one DB.
+        return (
+            0,
+            "同版本库内不支持会话迁移（会修改源账号归属），已跳过",
+            MigrateStatus.SKIPPED,
+        )
     conn = sqlite3.connect(str(source.db_path))
     cur = conn.cursor()
     _checkpoint(conn)
@@ -95,15 +253,7 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
     count = cur.fetchone()[0]
     if count == 0:
         conn.close()
-        return 0, "源账号无 session"
-
-    if same_db:
-        cur.execute("UPDATE sessions SET user_id = ? WHERE user_id = ?", (target_uid, source_uid))
-        migrated = cur.rowcount
-        conn.commit()
-        _checkpoint(conn)
-        conn.close()
-        return migrated, f"同库 UPDATE {migrated} 条"
+        return 0, "源账号无 session", MigrateStatus.SKIPPED
 
     cur.execute("SELECT * FROM sessions WHERE user_id = ?", (source_uid,))
     rows = cur.fetchall()
@@ -118,7 +268,7 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
     insert_cols = [c for c in cols if c in tcols]
     if "id" not in insert_cols or "user_id" not in insert_cols:
         tconn.close()
-        return 0, "目标表结构异常"
+        return 0, "目标表结构异常", MigrateStatus.FAILED
     col_sql = ", ".join(insert_cols)
     ph = ", ".join("?" for _ in insert_cols)
     idx = {c: cols.index(c) for c in insert_cols}
@@ -142,7 +292,7 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
     tconn.commit()
     _checkpoint(tconn)
     tconn.close()
-    return migrated, f"跨库复制 {migrated}，跳过 {skipped}"
+    return migrated, f"跨库复制 {migrated}，跳过 {skipped}", MigrateStatus.SUCCESS
 
 
 def migrate_session_content(session_ids: List[str], source: AppPaths, target: AppPaths) -> int:
@@ -242,7 +392,8 @@ def migrate_memory(source: AppPaths, target: AppPaths, source_uid: str, target_u
     if merged == dst_text and dst_text:
         return 0, "无新增"
     target.memory_dir.mkdir(parents=True, exist_ok=True)
-    dst.write_text(merged, encoding="utf-8")
+    ensure_within(target.root, dst)
+    atomic_write_text(dst, merged)
     return len(merged), f"Memory 已写入 {len(merged)} 字符"
 
 
@@ -276,6 +427,7 @@ def migrate_connectors(source: AppPaths, target: AppPaths, source_uid: str, targ
     dst_dir = target.connectors_user_dir(target_uid)
     if not src_dir.exists():
         return 0, "源无 Connectors"
+    ensure_within(target.root, dst_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
     added = 0
     for fname in ["mcp.json", "connector-states.json"]:
@@ -287,20 +439,22 @@ def migrate_connectors(source: AppPaths, target: AppPaths, source_uid: str, targ
             src_data = json.loads(src_file.read_text(encoding="utf-8"))
         except Exception:
             continue
-        dst_data = {}
         if dst_file.exists():
             try:
                 dst_data = json.loads(dst_file.read_text(encoding="utf-8"))
             except Exception:
-                dst_data = {}
+                # Never overwrite a malformed target file with {}
+                raise WriteConflict(f"{dst_file.name} 无法解析，已中止以保护原文件")
+        else:
+            dst_data = {}
         if isinstance(src_data, dict) and isinstance(dst_data, dict):
             before = len(dst_data.get("mcpServers") or {}) if fname == "mcp.json" else len(dst_data)
             _deep_merge(src_data, dst_data)
             after = len(dst_data.get("mcpServers") or {}) if fname == "mcp.json" else len(dst_data)
-            dst_file.write_text(json.dumps(dst_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write_json(dst_file, dst_data)
             added += max(0, after - before)
         elif not dst_data:
-            dst_file.write_text(json.dumps(src_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write_json(dst_file, src_data)
             added += 1
     servers = 0
     mcp = dst_dir / "mcp.json"
@@ -313,12 +467,16 @@ def migrate_connectors(source: AppPaths, target: AppPaths, source_uid: str, targ
 
 
 def migrate_tasks(source: AppPaths, target: AppPaths, session_ids: List[str]) -> int:
-    if not source.tasks_dir.exists():
+    """Copy only task dirs that belong to the selected source sessions.
+
+    Empty session_ids means no source sessions — never fall back to all tasks.
+    """
+    if not source.tasks_dir.exists() or not session_ids:
         return 0
-    ids = session_ids or [p.name for p in source.tasks_dir.iterdir() if p.is_dir()]
+    ensure_within(target.root, target.tasks_dir)
     target.tasks_dir.mkdir(parents=True, exist_ok=True)
     copied = 0
-    for sid in ids:
+    for sid in session_ids:
         if _copy_if_missing(source.tasks_dir / sid, target.tasks_dir / sid):
             copied += 1
     return copied
@@ -339,32 +497,35 @@ def migrate_skills(source: AppPaths, target: AppPaths) -> int:
     return _merge_copy_dir(source.skills_dir, target.skills_dir)
 
 
+def _load_installed_plugins(path: Path, *, role: str) -> dict:
+    """Parse installed_plugins.json. Malformed files must not be treated as empty."""
+    if not path.exists():
+        return {"version": 1, "plugins": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise WriteConflict(f"{role} installed_plugins.json 无法解析，已中止以保护原文件: {e}")
+    if not isinstance(data, dict):
+        raise WriteConflict(f"{role} installed_plugins.json 结构异常，已中止以保护原文件")
+    plugins = data.get("plugins")
+    if isinstance(plugins, list):
+        mapped = {}
+        for i, p in enumerate(plugins):
+            k = (p.get("id") or p.get("pluginId") or str(i)) if isinstance(p, dict) else str(i)
+            mapped[str(k)] = p
+        data["plugins"] = mapped
+    elif plugins is None:
+        data["plugins"] = {}
+    elif not isinstance(plugins, dict):
+        raise WriteConflict(f"{role} installed_plugins.json plugins 字段类型异常，已中止")
+    return data
+
+
 def _merge_installed_plugins(src_file: Path, dst_file: Path) -> int:
     if not src_file.exists():
         return 0
-
-    def load(path: Path) -> dict:
-        if not path.exists():
-            return {"version": 1, "plugins": {}}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                plugins = data.get("plugins")
-                if isinstance(plugins, list):
-                    mapped = {}
-                    for i, p in enumerate(plugins):
-                        k = (p.get("id") or p.get("pluginId") or str(i)) if isinstance(p, dict) else str(i)
-                        mapped[str(k)] = p
-                    data["plugins"] = mapped
-                elif not isinstance(plugins, dict):
-                    data["plugins"] = {}
-                return data
-        except Exception:
-            pass
-        return {"version": 1, "plugins": {}}
-
-    src = load(src_file)
-    dst = load(dst_file)
+    src = _load_installed_plugins(src_file, role="源")
+    dst = _load_installed_plugins(dst_file, role="目标")
     sp, dp = src.get("plugins") or {}, dst.get("plugins") or {}
     added = 0
     if isinstance(sp, dict) and isinstance(dp, dict):
@@ -374,7 +535,7 @@ def _merge_installed_plugins(src_file: Path, dst_file: Path) -> int:
                 added += 1
         dst["plugins"] = dp
     if added:
-        dst_file.write_text(json.dumps(dst, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_json(dst_file, dst)
     return added
 
 
@@ -438,8 +599,13 @@ def plan_migrate(
     target = make_paths(to_edition)
     if not target_uid:
         target_uid = get_current_uid(target)
+    source_uid = validate_uid(source_uid)
+    if target_uid:
+        target_uid = validate_uid(target_uid)
+
     scur_ids = session_ids_for_uid(source, source_uid)
     items = []
+
     def add(key: str, label: str, count: int, note: str = "") -> None:
         items.append({"key": key, "label": label, "count": count, "note": note})
 
@@ -448,10 +614,8 @@ def plan_migrate(
     mem = source.memory_file(source_uid)
     add("user_memory", "用户记忆", 1 if mem.exists() else 0, str(mem))
     tasks = 0
-    if source.tasks_dir.exists():
+    if source.tasks_dir.exists() and scur_ids:
         tasks = sum(1 for sid in scur_ids if (source.tasks_dir / sid).exists())
-        if not scur_ids:
-            tasks = sum(1 for p in source.tasks_dir.iterdir() if p.is_dir())
     add("tasks", "历史任务", tasks, "tasks/{session}")
     skills = sum(1 for _ in source.skills_dir.iterdir()) if source.skills_dir.exists() else 0
     add("skills", "技能 Skills", skills, "全局共享目录")
@@ -466,78 +630,186 @@ def plan_migrate(
     add("shared_plugins", "插件/连接器市场", 0, "plugins + connectors-marketplace")
     add("session_usage", "用量记录", len(scur_ids), "session_usage 表")
 
+    same_edition = source.edition == target.edition
+    same_account = same_edition and bool(target_uid) and source_uid == target_uid
+    blocked_keys = sorted(SESSION_SCOPED_ITEMS) if same_edition and not same_account else []
+    warnings: List[str] = []
+    blocked = False
+    block_reason = ""
+    if target_uid:
+        try:
+            # Read-only preflight for display. No writes.
+            preflight_migration(
+                from_edition,
+                to_edition,
+                source_uid,
+                target_uid,
+                set(KNOWN_ITEMS),
+            )
+        except SafetyError as e:
+            blocked = True
+            block_reason = e.message
+    else:
+        warnings.append("尚未选择目标账号，预览仅展示源侧数量")
+        if client_looks_running(source.edition) or client_looks_running(target.edition):
+            blocked = True
+            block_reason = "客户端正在运行，请完全退出后再执行迁移"
+
+    default_items = dict(DEFAULT_MIGRATE_ITEMS)
+    if same_edition:
+        for k in blocked_keys:
+            default_items[k] = False
+        if blocked_keys:
+            warnings.append("同版本账号间暂不支持会话相关迁移，默认已关闭对应选项")
+
     return {
         "from_edition": source.edition,
         "to_edition": target.edition,
         "source_uid": source_uid,
         "target_uid": target_uid,
-        "client_running": client_looks_running(target.edition),
+        "client_running": client_looks_running(source.edition) or client_looks_running(target.edition),
         "items": items,
-        "default_items": dict(DEFAULT_MIGRATE_ITEMS),
+        "default_items": default_items,
+        "blocked": blocked,
+        "block_reason": block_reason,
+        "blocked_item_keys": blocked_keys,
+        "same_edition": same_edition,
+        "same_account": same_account,
+        "warnings": warnings,
     }
 
 
+def _status_for_count(n: int, empty_detail: str = "") -> str:
+    if n > 0:
+        return MigrateStatus.SUCCESS
+    return MigrateStatus.SKIPPED
+
+
 def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute migration. Fail-closed: only explicitly true items run.
+
+    Preflight runs here again; plan results are never trusted.
+    """
     from_edition = payload["from_edition"]
     to_edition = payload["to_edition"]
     source_uid = payload["source_uid"]
     target_uid = payload.get("target_uid") or get_current_uid(make_paths(to_edition))
-    items = {**DEFAULT_MIGRATE_ITEMS, **(payload.get("items") or {})}
-    source = make_paths(from_edition)
-    target = make_paths(to_edition)
 
-    warnings = []
-    if client_looks_running(target.edition):
-        warnings.append("目标客户端可能正在运行，memory/mcp 可能被覆盖")
+    # Fail-closed selection: no DEFAULT merge.
+    selected = selected_true_items(payload.get("items"), KNOWN_ITEMS)
+    if not selected:
+        return {
+            "ok": True,
+            "status": "skipped",
+            "warnings": ["未选择任何迁移项目，未执行任何写入"],
+            "backups": [],
+            "results": [],
+            "target_uid": target_uid,
+            "source_uid": source_uid,
+            "need_restart": False,
+        }
 
-    backups = []
+    # Write barrier: every unsafe condition must throw before create_backup.
+    preflight = preflight_migration(from_edition, to_edition, source_uid, target_uid, selected)
+
+    source = make_paths(preflight["from_edition"])
+    target = make_paths(preflight["to_edition"])
+    source_uid = preflight["source_uid"]
+    target_uid = preflight["target_uid"]
+
+    warnings: List[str] = []
+    backups: List[str] = []
     backups.append(create_backup(target, target_uid, "target"))
     if source.edition != target.edition:
         backups.append(create_backup(source, source_uid, "source"))
 
     results: List[MigrateItemResult] = []
-    # Cache before UPDATE may clear source user_id mapping
     session_ids = session_ids_for_uid(source, source_uid)
 
-    if items.get("sessions"):
-        n, detail = migrate_sessions(source, target, source_uid, target_uid)
-        results.append(MigrateItemResult("sessions", True, detail, n))
+    def add_result(key: str, status: str, detail: str, count: int = 0) -> None:
+        results.append(MigrateItemResult(key, status, detail, count))
 
-    if items.get("session_content"):
-        n = migrate_session_content(session_ids, source, target)
-        results.append(MigrateItemResult("session_content", True, f"复制 {n} 项", n))
+    if "sessions" in selected:
+        try:
+            n, detail, status = migrate_sessions(source, target, source_uid, target_uid)
+            add_result("sessions", status, detail, n)
+        except Exception as e:
+            add_result("sessions", MigrateStatus.FAILED, str(e), 0)
 
-    if items.get("user_memory"):
-        n, detail = migrate_memory(source, target, source_uid, target_uid)
-        results.append(MigrateItemResult("user_memory", True, detail, n))
+    if "session_content" in selected:
+        try:
+            n = migrate_session_content(session_ids, source, target)
+            add_result(
+                "session_content",
+                _status_for_count(n),
+                f"复制 {n} 项" if n else "无会话正文可复制",
+                n,
+            )
+        except Exception as e:
+            add_result("session_content", MigrateStatus.FAILED, str(e), 0)
 
-    if items.get("mcp_connectors"):
-        n, detail = migrate_connectors(source, target, source_uid, target_uid)
-        results.append(MigrateItemResult("mcp_connectors", True, detail, n))
+    if "user_memory" in selected:
+        try:
+            n, detail = migrate_memory(source, target, source_uid, target_uid)
+            add_result("user_memory", _status_for_count(n), detail, n)
+        except Exception as e:
+            add_result("user_memory", MigrateStatus.FAILED, str(e), 0)
 
-    if items.get("tasks"):
-        n = migrate_tasks(source, target, session_ids)
-        results.append(MigrateItemResult("tasks", True, f"任务目录 {n}", n))
+    if "mcp_connectors" in selected:
+        try:
+            n, detail = migrate_connectors(source, target, source_uid, target_uid)
+            add_result("mcp_connectors", _status_for_count(n), detail, n)
+        except Exception as e:
+            add_result("mcp_connectors", MigrateStatus.FAILED, str(e), 0)
 
-    if items.get("skills"):
-        n = migrate_skills(source, target)
-        results.append(MigrateItemResult("skills", True, f"新增 {n}", n))
+    if "tasks" in selected:
+        try:
+            n = migrate_tasks(source, target, session_ids)
+            add_result(
+                "tasks",
+                _status_for_count(n),
+                f"任务目录 {n}" if n else "无关联任务可迁移",
+                n,
+            )
+        except Exception as e:
+            add_result("tasks", MigrateStatus.FAILED, str(e), 0)
 
-    if items.get("shared_plugins"):
-        n = migrate_shared_plugins(source, target)
-        results.append(MigrateItemResult("shared_plugins", True, f"新增 {n}", n))
+    if "skills" in selected:
+        try:
+            n = migrate_skills(source, target)
+            add_result("skills", _status_for_count(n), f"新增 {n}", n)
+        except Exception as e:
+            add_result("skills", MigrateStatus.FAILED, str(e), 0)
 
-    if items.get("session_usage"):
-        n = migrate_session_usage(source, target, session_ids)
-        results.append(MigrateItemResult("session_usage", True, f"复制 {n} 行", n))
+    if "shared_plugins" in selected:
+        try:
+            n = migrate_shared_plugins(source, target)
+            add_result("shared_plugins", _status_for_count(n), f"新增 {n}", n)
+        except Exception as e:
+            add_result("shared_plugins", MigrateStatus.FAILED, str(e), 0)
 
+    if "session_usage" in selected:
+        try:
+            n = migrate_session_usage(source, target, session_ids)
+            add_result(
+                "session_usage",
+                _status_for_count(n),
+                f"复制 {n} 行" if n else "无用量记录可复制",
+                n,
+            )
+        except Exception as e:
+            add_result("session_usage", MigrateStatus.FAILED, str(e), 0)
+
+    failed = [r for r in results if r.status == MigrateStatus.FAILED]
     return {
-        "ok": True,
+        "ok": not failed,
+        "status": "failed" if failed else "success",
         "warnings": warnings,
         "backups": backups,
         "results": [r.to_dict() for r in results],
         "target_uid": target_uid,
         "source_uid": source_uid,
+        "selected_items": sorted(selected),
         "need_restart": True,
     }
 

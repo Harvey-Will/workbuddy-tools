@@ -7,8 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .editions import AppPaths, make_paths, normalize_edition
+from .editions import AppPaths, client_looks_running, make_paths, normalize_edition
 from .models import AccountInfo
+from .safety import (
+    ClientRunningError,
+    InvalidUID,
+    WriteConflict,
+    atomic_write_json,
+    atomic_write_text,
+    ensure_within,
+    validate_uid,
+)
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -165,9 +174,7 @@ def load_nickname_cache(paths: AppPaths) -> Dict[str, str]:
 
 def save_nickname_cache(paths: AppPaths, mapping: Dict[str, str]) -> None:
     paths.tools_meta_dir.mkdir(parents=True, exist_ok=True)
-    nicknames_cache_path(paths).write_text(
-        json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    atomic_write_json(nicknames_cache_path(paths), mapping)
 
 
 def remember_nickname(paths: AppPaths, uid: str, nickname: str) -> None:
@@ -302,9 +309,7 @@ def seed_nicknames_from_snapshot(paths: AppPaths) -> None:
 def set_account_label(edition: str, uid: str, label: str) -> Dict[str, Any]:
     """User-editable display label. Empty label clears profile override."""
     paths = make_paths(edition)
-    uid = (uid or "").strip()
-    if not uid:
-        raise ValueError("uid required")
+    uid = validate_uid(uid)
     label = (label or "").strip()
     items = load_profiles(edition)
     found = False
@@ -328,7 +333,7 @@ def set_account_label(edition: str, uid: str, label: str) -> Dict[str, Any]:
             }
         )
     paths.tools_meta_dir.mkdir(parents=True, exist_ok=True)
-    profiles_path(paths).write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(profiles_path(paths), items)
 
     if label:
         remember_nickname(paths, uid, label)
@@ -404,12 +409,16 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
     paths = make_paths(edition)
     if not paths.root.exists():
         raise FileNotFoundError(f"edition data root missing: {paths.root}")
+    target_uid = validate_uid(target_uid)
+    if client_looks_running(paths.edition):
+        raise ClientRunningError("客户端正在运行，请完全退出 WorkBuddy 后再切换账号")
     known = {a.uid for a in list_accounts(edition)}
     if target_uid not in known:
         # still allow switch to unknown uid (user may add new)
         pass
     snapshot = paths.account_snapshot_path
     snapshot.parent.mkdir(parents=True, exist_ok=True)
+    ensure_within(paths.root, snapshot)
     backup_path = None
     if snapshot.exists():
         paths.backup_root.mkdir(parents=True, exist_ok=True)
@@ -422,8 +431,12 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
         try:
             data = json.loads(snapshot.read_text(encoding="utf-8"))
         except Exception:
-            data = {}
+            raise WriteConflict("account-snapshot.json 无法解析，已中止切换以保护原文件")
+        if not isinstance(data, dict):
+            raise WriteConflict("account-snapshot.json 结构异常，已中止切换以保护原文件")
     primary = data.get("primary") or {}
+    if not isinstance(primary, dict):
+        raise WriteConflict("account-snapshot.json primary 结构异常，已中止切换")
     old_uid = primary.get("uid") or ""
     # remember outgoing current nickname, then resolve target display name
     if old_uid and primary.get("nickname"):
@@ -447,7 +460,7 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
         }
     )
     data["primary"] = primary
-    snapshot.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(snapshot, data)
     return {
         "ok": True,
         "edition": paths.edition,
@@ -485,16 +498,12 @@ def add_profile(edition: str, uid: str, label: str = "") -> Dict[str, Any]:
     paths = make_paths(edition)
     paths.tools_meta_dir.mkdir(parents=True, exist_ok=True)
     items = load_profiles(edition)
-    uid = (uid or "").strip()
-    if not uid:
-        raise ValueError("uid required")
+    uid = validate_uid(uid)
     for item in items:
         if item.get("uid") == uid:
             item["label"] = label or item.get("label") or ""
             item["updatedAt"] = datetime.now().isoformat()
-            profiles_path(paths).write_text(
-                json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            atomic_write_json(profiles_path(paths), items)
             return item
     item = {
         "uid": uid,
@@ -504,5 +513,5 @@ def add_profile(edition: str, uid: str, label: str = "") -> Dict[str, Any]:
         "updatedAt": datetime.now().isoformat(),
     }
     items.append(item)
-    profiles_path(paths).write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(profiles_path(paths), items)
     return item
