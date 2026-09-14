@@ -445,7 +445,7 @@ async function loadPlan(): Promise<void> {
       .map((k) => {
         const item = plan.items?.find((i) => i.key === k);
         const checked = state.selectedItems[k] === true;
-        const disabled = blockedKeys.has(k) || plan.blocked || plan.client_running;
+        const disabled = blockedKeys.has(k) || plan.client_running;
         return `
         <label class="check-item">
           <input type="checkbox" data-item="${k}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />

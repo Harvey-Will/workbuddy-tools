@@ -16,11 +16,13 @@ from .safety import (
     MigrationBlocked,
     SafetyError,
     SchemaIncompatible,
+    UnsafePath,
     WriteConflict,
     atomic_write_json,
     atomic_write_text,
     ensure_within,
     selected_true_items,
+    validate_path_component,
     validate_uid,
 )
 
@@ -102,9 +104,9 @@ def validate_minimum_schema(db_path: Path, items: Set[str]) -> None:
     """Only check tables/columns that this migration will actually touch."""
     if not items:
         return
-    need_sessions = bool(items & {"sessions", "session_content", "tasks", "session_usage"})
+    need_sessions_cols = bool(items & SESSION_SCOPED_ITEMS)
     if not db_path.exists():
-        if need_sessions or "session_usage" in items:
+        if need_sessions_cols or "session_usage" in items:
             raise SchemaIncompatible("源数据库不存在")
         return
     conn = sqlite3.connect(str(db_path))
@@ -112,12 +114,12 @@ def validate_minimum_schema(db_path: Path, items: Set[str]) -> None:
         cur = conn.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
         has_sessions = cur.fetchone() is not None
-        if need_sessions and not has_sessions:
+        if need_sessions_cols and not has_sessions:
             raise SchemaIncompatible(
                 "检测到当前 WorkBuddy 数据库结构与本工具验证过的结构不兼容（缺少 sessions 表）。"
                 "为避免损坏数据，本次迁移已取消。"
             )
-        if has_sessions and "sessions" in items:
+        if has_sessions and need_sessions_cols:
             cols = _table_columns(conn, "sessions")
             if not {"id", "user_id"}.issubset(cols):
                 raise SchemaIncompatible(
@@ -133,8 +135,26 @@ def validate_minimum_schema(db_path: Path, items: Set[str]) -> None:
                     "检测到当前 WorkBuddy 数据库结构与本工具验证过的结构不兼容"
                     "（缺少 session_usage 表）。为避免损坏数据，本次迁移已取消。"
                 )
+            cols = _table_columns(conn, "session_usage")
+            if "session_id" not in cols:
+                raise SchemaIncompatible(
+                    "检测到当前 WorkBuddy 数据库结构与本工具验证过的结构不兼容"
+                    "（session_usage 缺少 session_id）。为避免损坏数据，本次迁移已取消。"
+                )
     finally:
         conn.close()
+
+
+def _load_connector_json(path: Path, *, role: str, fname: str) -> Optional[dict]:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise WriteConflict(f"{role} {fname} 无法解析，已中止以保护原文件: {e}")
+    if not isinstance(data, dict):
+        raise WriteConflict(f"{role} {fname} 结构异常，已中止以保护原文件")
+    return data
 
 
 def preflight_migration(
@@ -202,13 +222,9 @@ def preflight_migration(
             ("源", source, source_uid),
             ("目标", target, target_uid),
         ):
-            mcp = root.connectors_user_dir(uid) / "mcp.json"
-            if not mcp.exists():
-                continue
-            try:
-                json.loads(mcp.read_text(encoding="utf-8"))
-            except Exception as e:
-                raise WriteConflict(f"{label} mcp.json 无法解析，已中止以保护原文件: {e}")
+            conn_dir = root.connectors_user_dir(uid)
+            for fname in ("mcp.json", "connector-states.json"):
+                _load_connector_json(conn_dir / fname, role=label, fname=fname)
 
     return {
         "from_edition": fe,
@@ -220,18 +236,29 @@ def preflight_migration(
     }
 
 
-def session_ids_for_uid(paths: AppPaths, uid: str) -> List[str]:
+def session_ids_for_uid(paths: AppPaths, uid: str, *, strict: bool = False) -> List[str]:
     if not paths.db_path.exists() or not uid:
+        if strict and uid:
+            raise SchemaIncompatible("源数据库不存在，无法读取 session 列表")
         return []
     try:
         conn = sqlite3.connect(str(paths.db_path))
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM sessions WHERE user_id = ?", (uid,))
-        rows = [r[0] for r in cur.fetchall() if r and r[0]]
-        conn.close()
-        return rows
-    except sqlite3.Error:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM sessions WHERE user_id = ?", (uid,))
+            rows = [r[0] for r in cur.fetchall() if r and r[0]]
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        if strict:
+            raise SchemaIncompatible(f"读取源 sessions 失败，已中止: {e}") from e
         return []
+    if not strict:
+        return [str(x) for x in rows]
+    validated: List[str] = []
+    for sid in rows:
+        validated.append(validate_path_component(sid, label="session_id"))
+    return validated
 
 
 def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target_uid: str) -> Tuple[int, str, str]:
@@ -247,51 +274,53 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
             MigrateStatus.SKIPPED,
         )
     conn = sqlite3.connect(str(source.db_path))
-    cur = conn.cursor()
-    _checkpoint(conn)
-    cur.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (source_uid,))
-    count = cur.fetchone()[0]
-    if count == 0:
+    try:
+        cur = conn.cursor()
+        _checkpoint(conn)
+        cur.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (source_uid,))
+        count = cur.fetchone()[0]
+        if count == 0:
+            return 0, "源账号无 session", MigrateStatus.SKIPPED
+        cur.execute("SELECT * FROM sessions WHERE user_id = ?", (source_uid,))
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description]
+    except sqlite3.Error as e:
+        raise SchemaIncompatible(f"读取源 sessions 失败，已中止: {e}") from e
+    finally:
         conn.close()
-        return 0, "源账号无 session", MigrateStatus.SKIPPED
-
-    cur.execute("SELECT * FROM sessions WHERE user_id = ?", (source_uid,))
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description]
-    conn.close()
 
     tconn = sqlite3.connect(str(target.db_path))
-    tcur = tconn.cursor()
-    _checkpoint(tconn)
-    tcur.execute("PRAGMA table_info(sessions)")
-    tcols = {r[1] for r in tcur.fetchall()}
-    insert_cols = [c for c in cols if c in tcols]
-    if "id" not in insert_cols or "user_id" not in insert_cols:
-        tconn.close()
-        return 0, "目标表结构异常", MigrateStatus.FAILED
-    col_sql = ", ".join(insert_cols)
-    ph = ", ".join("?" for _ in insert_cols)
-    idx = {c: cols.index(c) for c in insert_cols}
-    migrated = 0
-    skipped = 0
-    for row in rows:
-        vals = []
-        for c in insert_cols:
-            v = row[idx[c]]
-            if c == "user_id":
-                v = target_uid
-            vals.append(v)
-        try:
+    try:
+        tcur = tconn.cursor()
+        _checkpoint(tconn)
+        tcur.execute("PRAGMA table_info(sessions)")
+        tcols = {r[1] for r in tcur.fetchall()}
+        insert_cols = [c for c in cols if c in tcols]
+        if "id" not in insert_cols or "user_id" not in insert_cols:
+            return 0, "目标表结构异常", MigrateStatus.FAILED
+        col_sql = ", ".join(insert_cols)
+        ph = ", ".join("?" for _ in insert_cols)
+        idx = {c: cols.index(c) for c in insert_cols}
+        migrated = 0
+        skipped = 0
+        for row in rows:
+            vals = []
+            for c in insert_cols:
+                v = row[idx[c]]
+                if c == "user_id":
+                    v = target_uid
+                vals.append(v)
             tcur.execute(f"INSERT OR IGNORE INTO sessions ({col_sql}) VALUES ({ph})", vals)
             if tcur.rowcount > 0:
                 migrated += 1
             else:
                 skipped += 1
-        except sqlite3.Error:
-            skipped += 1
-    tconn.commit()
-    _checkpoint(tconn)
-    tconn.close()
+        tconn.commit()
+    except sqlite3.Error as e:
+        tconn.rollback()
+        raise SchemaIncompatible(f"写入目标 sessions 失败，已中止: {e}") from e
+    finally:
+        tconn.close()
     return migrated, f"跨库复制 {migrated}，跳过 {skipped}", MigrateStatus.SUCCESS
 
 
@@ -437,14 +466,18 @@ def migrate_connectors(source: AppPaths, target: AppPaths, source_uid: str, targ
             continue
         try:
             src_data = json.loads(src_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except Exception as e:
+            raise WriteConflict(f"源 {fname} 无法解析，已中止以保护原文件: {e}")
+        if not isinstance(src_data, dict):
+            raise WriteConflict(f"源 {fname} 结构异常，已中止以保护原文件")
         if dst_file.exists():
             try:
                 dst_data = json.loads(dst_file.read_text(encoding="utf-8"))
             except Exception:
                 # Never overwrite a malformed target file with {}
                 raise WriteConflict(f"{dst_file.name} 无法解析，已中止以保护原文件")
+            if not isinstance(dst_data, dict):
+                raise WriteConflict(f"{dst_file.name} 结构异常，已中止以保护原文件")
         else:
             dst_data = {}
         if isinstance(src_data, dict) and isinstance(dst_data, dict):
@@ -477,7 +510,10 @@ def migrate_tasks(source: AppPaths, target: AppPaths, session_ids: List[str]) ->
     target.tasks_dir.mkdir(parents=True, exist_ok=True)
     copied = 0
     for sid in session_ids:
-        if _copy_if_missing(source.tasks_dir / sid, target.tasks_dir / sid):
+        safe_sid = validate_path_component(sid, label="session_id")
+        ensure_within(source.tasks_dir, source.tasks_dir / safe_sid)
+        ensure_within(target.tasks_dir, target.tasks_dir / safe_sid)
+        if _copy_if_missing(source.tasks_dir / safe_sid, target.tasks_dir / safe_sid):
             copied += 1
     return copied
 
@@ -554,36 +590,38 @@ def migrate_session_usage(source: AppPaths, target: AppPaths, session_ids: List[
     if not source.db_path.exists() or not target.db_path.exists() or not session_ids:
         return 0
     sconn = sqlite3.connect(str(source.db_path))
-    scur = sconn.cursor()
     try:
+        scur = sconn.cursor()
         scur.execute(
             f"SELECT * FROM session_usage WHERE session_id IN ({','.join('?' for _ in session_ids)})",
             session_ids,
         )
-    except sqlite3.Error:
+        rows = scur.fetchall()
+        cols = [d[0] for d in scur.description]
+    except sqlite3.Error as e:
+        raise SchemaIncompatible(f"读取源 session_usage 失败，已中止: {e}") from e
+    finally:
         sconn.close()
-        return 0
-    rows = scur.fetchall()
-    cols = [d[0] for d in scur.description]
-    sconn.close()
     tconn = sqlite3.connect(str(target.db_path))
-    tcur = tconn.cursor()
-    copied = 0
     try:
+        tcur = tconn.cursor()
         tcur.execute("PRAGMA table_info(session_usage)")
         tcols = {r[1] for r in tcur.fetchall()}
         insert_cols = [c for c in cols if c in tcols]
+        if "session_id" not in insert_cols:
+            raise SchemaIncompatible("目标 session_usage 表结构异常，已中止")
         col_sql = ", ".join(insert_cols)
         ph = ", ".join("?" for _ in insert_cols)
         idx = {c: cols.index(c) for c in insert_cols}
+        copied = 0
         for row in rows:
             vals = [row[idx[c]] for c in insert_cols]
-            try:
-                tcur.execute(f"INSERT OR IGNORE INTO session_usage ({col_sql}) VALUES ({ph})", vals)
-                copied += tcur.rowcount
-            except sqlite3.Error:
-                pass
+            tcur.execute(f"INSERT OR IGNORE INTO session_usage ({col_sql}) VALUES ({ph})", vals)
+            copied += tcur.rowcount
         tconn.commit()
+    except sqlite3.Error as e:
+        tconn.rollback()
+        raise SchemaIncompatible(f"写入目标 session_usage 失败，已中止: {e}") from e
     finally:
         tconn.close()
     return copied
@@ -636,24 +674,6 @@ def plan_migrate(
     warnings: List[str] = []
     blocked = False
     block_reason = ""
-    if target_uid:
-        try:
-            # Read-only preflight for display. No writes.
-            preflight_migration(
-                from_edition,
-                to_edition,
-                source_uid,
-                target_uid,
-                set(KNOWN_ITEMS),
-            )
-        except SafetyError as e:
-            blocked = True
-            block_reason = e.message
-    else:
-        warnings.append("尚未选择目标账号，预览仅展示源侧数量")
-        if client_looks_running(source.edition) or client_looks_running(target.edition):
-            blocked = True
-            block_reason = "客户端正在运行，请完全退出后再执行迁移"
 
     default_items = dict(DEFAULT_MIGRATE_ITEMS)
     if same_edition:
@@ -661,6 +681,28 @@ def plan_migrate(
             default_items[k] = False
         if blocked_keys:
             warnings.append("同版本账号间暂不支持会话相关迁移，默认已关闭对应选项")
+
+    # Preflight only the preview defaults (what UI would run), not every known key.
+    preview_selected = {k for k, v in default_items.items() if v is True}
+    if target_uid and preview_selected:
+        try:
+            preflight_migration(
+                from_edition,
+                to_edition,
+                source_uid,
+                target_uid,
+                preview_selected,
+            )
+        except SafetyError as e:
+            blocked = True
+            block_reason = e.message
+    elif target_uid and not preview_selected:
+        warnings.append("当前默认未选择任何可迁移项目")
+    else:
+        warnings.append("尚未选择目标账号，预览仅展示源侧数量")
+        if client_looks_running(source.edition) or client_looks_running(target.edition):
+            blocked = True
+            block_reason = "客户端正在运行，请完全退出后再执行迁移"
 
     return {
         "from_edition": source.edition,
@@ -717,6 +759,11 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
     source_uid = preflight["source_uid"]
     target_uid = preflight["target_uid"]
 
+    # Strict session IDs before any backup/write.
+    session_ids: List[str] = []
+    if selected & SESSION_SCOPED_ITEMS:
+        session_ids = session_ids_for_uid(source, source_uid, strict=True)
+
     warnings: List[str] = []
     backups: List[str] = []
     backups.append(create_backup(target, target_uid, "target"))
@@ -724,7 +771,6 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
         backups.append(create_backup(source, source_uid, "source"))
 
     results: List[MigrateItemResult] = []
-    session_ids = session_ids_for_uid(source, source_uid)
 
     def add_result(key: str, status: str, detail: str, count: int = 0) -> None:
         results.append(MigrateItemResult(key, status, detail, count))

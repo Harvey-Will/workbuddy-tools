@@ -540,6 +540,140 @@ class TestMigrationBlocks(SafetyCase):
             "{not-json",
         )
 
+    def test_malformed_target_connector_states_blocked_preflight(self):
+        self.dual_edition()
+        from core import migrate as migrate_mod
+        from core.safety import WriteConflict
+
+        self._no_client(migrate_mod)
+        src_conn = self.home / ".workbuddy" / "connectors" / UID_A
+        src_conn.mkdir(parents=True, exist_ok=True)
+        (src_conn / "mcp.json").write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        (src_conn / "connector-states.json").write_text(json.dumps({"a": 1}), encoding="utf-8")
+        dst_conn = self.home / ".workbuddy-ai" / "connectors" / UID_B
+        dst_conn.mkdir(parents=True, exist_ok=True)
+        (dst_conn / "mcp.json").write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+        (dst_conn / "connector-states.json").write_text("{broken", encoding="utf-8")
+        before = snapshot_tree(self.home)
+        with self.assertRaises(WriteConflict):
+            migrate_mod.run_migrate(
+                {
+                    "from_edition": "domestic",
+                    "to_edition": "international",
+                    "source_uid": UID_A,
+                    "target_uid": UID_B,
+                    "items": {"mcp_connectors": True},
+                }
+            )
+        self.assertEqual(snapshot_tree(self.home), before)
+        self.assertEqual((dst_conn / "connector-states.json").read_text(encoding="utf-8"), "{broken")
+
+    def test_malformed_source_mcp_blocked(self):
+        self.dual_edition()
+        from core import migrate as migrate_mod
+        from core.safety import WriteConflict
+
+        self._no_client(migrate_mod)
+        src_conn = self.home / ".workbuddy" / "connectors" / UID_A
+        src_conn.mkdir(parents=True, exist_ok=True)
+        (src_conn / "mcp.json").write_text("{bad", encoding="utf-8")
+        before = snapshot_tree(self.home)
+        with self.assertRaises(WriteConflict):
+            migrate_mod.run_migrate(
+                {
+                    "from_edition": "domestic",
+                    "to_edition": "international",
+                    "source_uid": UID_A,
+                    "target_uid": UID_B,
+                    "items": {"mcp_connectors": True},
+                }
+            )
+        self.assertEqual(snapshot_tree(self.home), before)
+
+    def test_tasks_only_requires_sessions_columns(self):
+        self.dual_edition()
+        from core import migrate as migrate_mod
+        from core.safety import SchemaIncompatible
+
+        self._no_client(migrate_mod)
+        db = self.home / ".workbuddy" / "workbuddy.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("DROP TABLE sessions")
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+        conn.commit()
+        conn.close()
+        before = snapshot_tree(self.home)
+        with self.assertRaises(SchemaIncompatible):
+            migrate_mod.run_migrate(
+                {
+                    "from_edition": "domestic",
+                    "to_edition": "international",
+                    "source_uid": UID_A,
+                    "target_uid": UID_B,
+                    "items": {"tasks": True},
+                }
+            )
+        self.assertEqual(snapshot_tree(self.home), before)
+
+    def test_malicious_session_id_blocked(self):
+        self.dual_edition()
+        from core import migrate as migrate_mod
+        from core.safety import UnsafePath
+
+        self._no_client(migrate_mod)
+        db = self.home / ".workbuddy" / "workbuddy.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, title) VALUES (?,?,?)",
+            ("../../escape", UID_A, "evil"),
+        )
+        conn.commit()
+        conn.close()
+        outside = self.home.parent / "escape-should-not-exist"
+        before = snapshot_tree(self.home)
+        with self.assertRaises(UnsafePath):
+            migrate_mod.run_migrate(
+                {
+                    "from_edition": "domestic",
+                    "to_edition": "international",
+                    "source_uid": UID_A,
+                    "target_uid": UID_B,
+                    "items": {"tasks": True},
+                }
+            )
+        self.assertEqual(snapshot_tree(self.home), before)
+        self.assertFalse(outside.exists())
+
+    def test_same_edition_plan_allows_safe_defaults(self):
+        self.same_edition()
+        from core import migrate as migrate_mod
+
+        self._no_client(migrate_mod)
+        plan = migrate_mod.plan_migrate("domestic", "domestic", UID_A, UID_B)
+        self.assertFalse(plan["blocked"], plan.get("block_reason"))
+        self.assertFalse(plan["default_items"]["sessions"])
+        self.assertFalse(plan["default_items"]["tasks"])
+        self.assertTrue(plan["default_items"]["user_memory"])
+        self.assertIn("sessions", plan["blocked_item_keys"])
+
+    def test_same_edition_memory_migration_allowed(self):
+        self.same_edition()
+        from core import migrate as migrate_mod
+
+        self._no_client(migrate_mod)
+        before_src_db = (self.home / ".workbuddy" / "workbuddy.db").read_bytes()
+        result = migrate_mod.run_migrate(
+            {
+                "from_edition": "domestic",
+                "to_edition": "domestic",
+                "source_uid": UID_A,
+                "target_uid": UID_B,
+                "items": {"user_memory": True},
+            }
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((self.home / ".workbuddy" / "workbuddy.db").read_bytes(), before_src_db)
+
 
 class TestSwitch(SafetyCase):
     def test_switch_client_running_blocks(self):

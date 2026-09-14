@@ -63,6 +63,22 @@ def validate_uid(raw: Any) -> str:
     return uid
 
 
+def validate_path_component(raw: Any, *, label: str = "id") -> str:
+    """Ensure a DB-derived value is a single safe path component."""
+    value = "" if raw is None else str(raw).strip()
+    if not value:
+        raise UnsafePath(f"{label} 不能为空")
+    if len(value) > 255:
+        raise UnsafePath(f"{label} 过长")
+    if any(ord(c) < 32 for c in value):
+        raise UnsafePath(f"{label} 含非法控制字符")
+    if value in {".", ".."}:
+        raise UnsafePath(f"{label} 非法: {value}")
+    if "/" in value or "\\" in value or ".." in value:
+        raise UnsafePath(f"{label} 含非法路径片段: {value}")
+    return value
+
+
 def ensure_within(root: Path, candidate: Path) -> Path:
     root_resolved = root.resolve()
     candidate_resolved = candidate.resolve()

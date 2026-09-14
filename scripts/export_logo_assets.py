@@ -1,10 +1,10 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import cairosvg
 from PIL import Image
 
 ROOT = Path(r"E:\workbuddy-tools")
-SVG = ROOT / "docs" / "logo" / "original-a1-wt-tool.svg"
+SVG = ROOT / "docs" / "logo" / "logo.svg"
 ICONS = ROOT / "src-tauri" / "icons"
 UI_ASSETS = ROOT / "ui" / "src" / "assets"
 
@@ -34,3 +34,4 @@ print("ico ok")
 # keep UI brand in sync with A1
 (UI_ASSETS / "logo.svg").write_text(SVG.read_text(encoding="utf-8"), encoding="utf-8")
 print("ui logo synced")
+
