@@ -439,14 +439,16 @@ async function loadPlan(): Promise<void> {
     });
     state.migratePlan = plan;
     state.selectedItems = { ...(plan.default_items || {}) };
+    const blockedKeys = new Set(plan.blocked_item_keys || []);
     const keys = [...new Set([...(plan.items || []).map((i) => i.key), ...Object.keys(MIGRATE_LABELS)])];
     $("#mig-items").innerHTML = keys
       .map((k) => {
         const item = plan.items?.find((i) => i.key === k);
-        const checked = state.selectedItems[k] !== false;
+        const checked = state.selectedItems[k] === true;
+        const disabled = blockedKeys.has(k) || plan.client_running;
         return `
         <label class="check-item">
-          <input type="checkbox" data-item="${k}" ${checked ? "checked" : ""} />
+          <input type="checkbox" data-item="${k}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
           <div>
             <div><strong>${MIGRATE_LABELS[k] || k}</strong> <span class="muted small">×${item?.count ?? 0}</span></div>
           </div>
@@ -459,14 +461,22 @@ async function loadPlan(): Promise<void> {
       });
     });
     const warn = $("#mig-warn");
-    if (plan.client_running) {
-      warn.textContent = "目标客户端可能正在运行，请先完全退出再执行迁移。";
+    const messages: string[] = [];
+    if (plan.blocked && plan.block_reason) messages.push(plan.block_reason);
+    if (plan.client_running) messages.push("客户端正在运行，请先完全退出 WorkBuddy / WorkBuddyAI 后再执行迁移。");
+    if (plan.same_edition && !plan.same_account) {
+      messages.push("同版本账号间暂不支持会话相关数据迁移（会话/正文/任务/用量），仅可迁移记忆、MCP、技能等。");
+    }
+    for (const w of plan.warnings || []) messages.push(w);
+    if (messages.length) {
+      warn.textContent = messages.join(" ");
       warn.classList.remove("hidden");
     } else warn.classList.add("hidden");
-    ($("#btn-run") as HTMLButtonElement).disabled = false;
-    $("#mig-hint").textContent = `${plan.source_uid.slice(0, 8)}… → ${plan.target_uid.slice(0, 8)}…`;
+    const runBtn = $("#btn-run") as HTMLButtonElement;
+    runBtn.disabled = Boolean(plan.blocked || plan.client_running);
+    $("#mig-hint").textContent = `${plan.source_uid.slice(0, 8)}… → ${(plan.target_uid || "").slice(0, 8)}…`;
     $("#step2").classList.add("on");
-    toast("已生成预览");
+    toast(plan.blocked ? "当前组合不可迁移" : "已生成预览");
   } catch (e) {
     toast((e as Error).message);
   }
@@ -489,13 +499,16 @@ async function runMigrate(): Promise<void> {
     const rows = (r.results || [])
       .map(
         (x) =>
-          `<div class="list-item"><div><strong>${MIGRATE_LABELS[x.key] || x.key}</strong><div class="muted small">${escapeHtml(x.detail)}</div></div><span class="badge ${x.ok ? "ok" : ""}">${x.count}</span></div>`,
+          `<div class="list-item"><div><strong>${MIGRATE_LABELS[x.key] || x.key}</strong><div class="muted small">${escapeHtml(x.detail)}</div></div><span class="badge ${x.status === "success" ? "ok" : ""}">${escapeHtml(x.status)} · ${x.count}</span></div>`,
       )
       .join("");
     $("#mig-result").innerHTML =
-      warns + rows + `<div class="muted small" style="margin-top:.5rem">${r.need_restart ? "请重启客户端后查看。" : "完成"}</div>`;
+      warns +
+      (r.ok === false ? `<div class="banner warn">迁移未完全成功，请检查下方失败项。</div>` : "") +
+      rows +
+      `<div class="muted small" style="margin-top:.5rem">${r.need_restart ? "请重启客户端后查看。" : "完成"}</div>`;
     $("#step3").classList.add("on");
-    toast("迁移完成");
+    toast(r.ok === false ? "迁移存在失败项" : "迁移完成");
     await loadAccounts();
   } catch (e) {
     toast((e as Error).message);

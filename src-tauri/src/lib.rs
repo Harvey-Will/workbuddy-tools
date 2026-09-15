@@ -52,8 +52,7 @@ fn sidecar_hash(bytes: &[u8]) -> u64 {
 
 /// Embedded API sidecar (built by scripts/build_sidecar.ps1).
 #[cfg(target_os = "windows")]
-static SIDECAR_BYTES: &[u8] =
-    include_bytes!("../binaries/sidecar-x86_64-pc-windows-msvc.exe");
+static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-x86_64-pc-windows-msvc.exe");
 
 fn hide_console(cmd: &mut std::process::Command) {
     #[cfg(target_os = "windows")]
@@ -72,7 +71,7 @@ fn extract_embedded_sidecar() -> Option<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        let dir = std::env::temp_dir().join("workbuddy-tools").join("0.1.0");
+        let dir = std::env::temp_dir().join("workbuddy-tools").join("0.1.1");
         std::fs::create_dir_all(&dir).ok()?;
         let path = dir.join("api-sidecar.exe");
         let want = format!("{:016x}", sidecar_hash(SIDECAR_BYTES));
@@ -197,7 +196,10 @@ fn api_proxy(req: ApiRequest) -> Result<ApiResponse, String> {
         .ok_or_else(|| "bad http response".to_string())?;
     let header = &raw[..split];
     let mut resp_body = raw[split + 4..].to_string();
-    if header.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    if header
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         resp_body = dechunk(&resp_body);
     }
     let status = header

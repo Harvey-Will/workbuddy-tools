@@ -49,12 +49,22 @@ class TokenEvent:
     edition: str
 
 
+class MigrateStatus:
+    SUCCESS = "success"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
 @dataclass
 class MigrateItemResult:
     key: str
-    ok: bool
+    status: str
     detail: str
     count: int = 0
+    ok: bool = True  # legacy field; status is authoritative
+
+    def __post_init__(self) -> None:
+        self.ok = self.status != MigrateStatus.FAILED
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

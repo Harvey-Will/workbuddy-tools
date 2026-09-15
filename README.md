@@ -13,7 +13,7 @@
 
 **功能**：账号总览 · 一键切号 · 选择性迁移 · 会话/记忆/技能/MCP · Token 统计 · 双版本支持 · 桌面端 / 命令行
 
-**平台**：Windows · Linux（macOS 路径已预留，欢迎反馈）
+**平台**：桌面端 Windows；CLI / Core 支持 Windows · Linux（macOS 路径已预留）
 
 ---
 
@@ -28,21 +28,26 @@
 
 ### 2. 迁移 / 复制
 
-支持**按需勾选**，copy 模式下目标已有内容会保留并合并：
+支持**按需勾选**，copy 模式下目标已有内容会保留并合并。**仅执行显式勾选的项目**（fail-closed）。
 
 | 项目 | 说明 |
 | :--- | :--- |
-| 聊天会话 | `sessions` 表；跨版本复制到目标库 |
-| 会话内容 | `projects/**/*.jsonl` 正文、附件、blobs |
+| 聊天会话 | `sessions` 表；**仅跨版本**复制到目标库 |
+| 会话内容 | `projects/**/*.jsonl` 正文、附件、blobs（仅跨版本） |
 | 用户记忆 | Memory Profile 结构合并 |
-| 历史任务 | `tasks/{session}` 目录 |
+| 历史任务 | `tasks/{session}` 目录（仅跨版本；无关联 session 时不迁） |
 | 技能 Skills | 全局目录，只补缺失 |
 | MCP 连接器 | `mcp.json` 深度合并 |
 | 插件市场 | connectors-marketplace 等 |
-| 用量记录 | `session_usage` 表 |
+| 用量记录 | `session_usage` 表（仅跨版本） |
 
+**安全边界（v0.1.1）**：
+
+- 同版本不同账号之间**暂不支持**会话相关数据迁移（需要 Session ID 重映射，当前版本拒绝执行以免修改源账号）
+- 源/目标 WorkBuddy **任一在运行**时禁止迁移与切换账号
+- 非法 UID / 路径穿越 / 账号不存在 / 数据库结构不兼容 → **第一次写盘前拒绝**
+- 目标 JSON 损坏时不会被空对象覆盖
 - **自动备份**：迁移前写入 `{数据目录}/.workbuddy-tools/backups/`
-- **客户端检测**：目标端运行中会提示先退出，避免配置被覆盖
 
 ### 3. Token 用量统计
 
@@ -80,7 +85,7 @@
 
 ### 选项 A：便携版（推荐）
 
-从 [Releases](../../releases) 下载 `WorkBuddyTools-portable-win64.zip`：
+从 [Releases](../../releases) 下载 `WorkBuddyTools-portable-win64-v0.1.1.zip`（或对应版本）：
 
 1. 解压到任意目录  
 2. 双击 **单个** `workbuddy-tools.exe`  
@@ -123,7 +128,23 @@ python scripts/dev.py
 5. Token 统计页：切换时间范围查看模型用量
 ```
 
-迁移前请**退出 WorkBuddy 客户端**，迁移完成后**重启客户端**。
+迁移前请**退出 WorkBuddy 客户端**，迁移完成后**重启客户端**。源端与目标端任一在运行时，本工具会拒绝迁移与切换。
+
+---
+
+## 版本说明
+
+### v0.1.1 — Safety Hotfix
+
+- 所有不安全迁移必须在**第一次磁盘写入之前**失败关闭（fail closed）
+- 修复同版本库内会话“复制”实为改写归属的问题：同版本会话相关迁移直接拒绝
+- 修复空 session 列表误迁全部 tasks 的问题
+- UID / 路径穿越校验、真实账号存在性校验、客户端运行硬阻断
+- 迁移只执行显式勾选项目；结果区分 success / skipped / failed
+
+### ⚠️ v0.1.0 已知问题
+
+请勿使用 v0.1.0 执行**同版本不同账号**之间的会话相关数据迁移。其实现可能修改源账号的会话归属，而非安全复制。请升级至 v0.1.1 后再使用迁移功能。
 
 ---
 
