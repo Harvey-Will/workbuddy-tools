@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, "v*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  python-tests:
+    name: Python Unit Tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m unittest discover -s tests
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install UI dependencies and build
+        run: |
+          npm ci --prefix ui
+          npm run build --prefix ui
+
+  rust-check:
+    name: Rust Cargo Check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml

@@ -48,6 +48,14 @@ class WriteConflict(SafetyError):
     code = "write_conflict"
 
 
+class BackupNotFound(SafetyError):
+    code = "backup_not_found"
+
+
+class BackupCorrupted(SafetyError):
+    code = "backup_corrupted"
+
+
 def validate_uid(raw: Any) -> str:
     uid = "" if raw is None else str(raw).strip()
     if not uid:

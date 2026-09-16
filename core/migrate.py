@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import sqlite3
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .accounts import discover_uids, get_current_uid
 from .editions import AppPaths, client_looks_running, make_paths, normalize_edition
 from .models import DEFAULT_MIGRATE_ITEMS, MigrateItemResult, MigrateStatus
 from .safety import (
     AccountNotFound,
+    BackupCorrupted,
+    BackupNotFound,
     ClientRunningError,
     MigrationBlocked,
     SafetyError,
@@ -63,35 +68,236 @@ def _checkpoint(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _backup_sqlite_db(src_db: Path, dst_db: Path) -> None:
+    """Use sqlite3.Connection.backup() to produce a consistent point-in-time snapshot.
+
+    This ensures transaction consistency across active WAL files without manual copying.
+    """
+    if not src_db.exists():
+        return
+    dst_db.parent.mkdir(parents=True, exist_ok=True)
+    src_conn = None
+    try:
+        try:
+            src_uri = f"file:{src_db.resolve().as_posix()}?mode=ro"
+            src_conn = sqlite3.connect(src_uri, uri=True)
+        except Exception:
+            src_conn = sqlite3.connect(str(src_db))
+        dst_conn = sqlite3.connect(str(dst_db))
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn, pages=100)
+        finally:
+            dst_conn.close()
+    finally:
+        if src_conn is not None:
+            src_conn.close()
+
+
 def create_backup(paths: AppPaths, target_uid: str, label: str = "migrate") -> str:
+    """Create point-in-time snapshot with SQLite backup API and manifest."""
+    if client_looks_running(paths.edition):
+        raise ClientRunningError(
+            f"检测到 {paths.edition} 客户端正在运行。为了数据安全，备份和迁移前请完全退出客户端。"
+        )
+    target_uid = validate_uid(target_uid)
     paths.backup_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    tag = f"{stamp}_{label}_{target_uid[:8]}"
+    rand_suffix = uuid.uuid4().hex[:6]
+    tag = f"{stamp}_{label}_{target_uid[:8]}_{rand_suffix}"
     backup_path = paths.backup_root / tag
     backup_path.mkdir(parents=True, exist_ok=True)
+
+    file_manifests: List[Dict[str, Any]] = []
+
+    def record_file(fpath: Path, target_role: str) -> None:
+        if fpath.is_file():
+            rel = str(fpath.relative_to(backup_path)).replace("\\", "/")
+            file_manifests.append({
+                "rel_path": rel,
+                "target_role": target_role,
+                "sha256": _file_sha256(fpath),
+                "size_bytes": fpath.stat().st_size,
+            })
+
+    # 1. SQLite Database via backup() API
     if paths.db_path.exists():
-        shutil.copy2(str(paths.db_path), str(backup_path / "workbuddy.db"))
+        dst_db = backup_path / "workbuddy.db"
+        _backup_sqlite_db(paths.db_path, dst_db)
+        record_file(dst_db, "workbuddy.db")
         for suffix in ("-wal", "-shm"):
             side = Path(str(paths.db_path) + suffix)
             if side.exists():
-                shutil.copy2(str(side), str(backup_path / side.name))
+                dst_side = backup_path / side.name
+                shutil.copy2(str(side), str(dst_side))
+                record_file(dst_side, side.name)
+
+    # 2. User memory profile
     mem = paths.memory_file(target_uid)
     if mem.exists():
-        shutil.copy2(str(mem), str(backup_path / mem.name))
+        dst_mem = backup_path / mem.name
+        shutil.copy2(str(mem), str(dst_mem))
+        record_file(dst_mem, f"memory/{mem.name}")
+
+    # 3. User connectors
     conn_dir = paths.connectors_user_dir(target_uid)
     if conn_dir.exists():
-        dst = backup_path / target_uid
-        if dst.exists():
-            shutil.rmtree(str(dst))
-        shutil.copytree(str(conn_dir), str(dst))
+        dst_conn = backup_path / target_uid
+        if dst_conn.exists():
+            shutil.rmtree(str(dst_conn))
+        shutil.copytree(str(conn_dir), str(dst_conn))
+        for p in dst_conn.rglob("*"):
+            if p.is_file():
+                record_file(p, f"connectors/{target_uid}/{p.relative_to(dst_conn)}")
+
+    # 4. Write manifest.json
+    manifest = {
+        "manifest_version": 2,
+        "backup_id": tag,
+        "timestamp": stamp,
+        "created_at": datetime.now().isoformat(),
+        "edition": paths.edition,
+        "target_uid": target_uid,
+        "label": label,
+        "files": file_manifests,
+    }
+    atomic_write_json(backup_path / "manifest.json", manifest)
+
+    # 5. Backward compatibility: meta.json
     meta = {
         "timestamp": stamp,
         "target_uid": target_uid,
         "edition": paths.edition,
-        "created_at": datetime.now().isoformat(),
+        "created_at": manifest["created_at"],
+        "backup_id": tag,
     }
     atomic_write_json(backup_path / "meta.json", meta)
     return str(backup_path)
+
+
+def restore_backup(paths: AppPaths, backup_id_or_tag: str) -> Dict[str, Any]:
+    """Restore database and files from a verified backup directory."""
+    if client_looks_running(paths.edition):
+        raise ClientRunningError(
+            f"检测到 {paths.edition} 客户端正在运行。为了数据安全，恢复备份前请完全退出客户端。"
+        )
+
+    safe_tag = validate_path_component(backup_id_or_tag, label="backup_id")
+    backup_path = paths.backup_root / safe_tag
+    ensure_within(paths.backup_root, backup_path)
+    if not backup_path.is_dir():
+        raise BackupNotFound(f"备份不存在: {backup_id_or_tag}")
+
+    manifest_file = backup_path / "manifest.json"
+    manifest: Optional[Dict[str, Any]] = None
+    if manifest_file.exists():
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise BackupCorrupted(f"备份 manifest.json 损坏: {e}") from e
+
+    # Integrity verification
+    if manifest and "files" in manifest:
+        for fentry in manifest["files"]:
+            fpath = backup_path / fentry["rel_path"]
+            if not fpath.is_file():
+                raise BackupCorrupted(f"备份文件缺失: {fentry['rel_path']}")
+            actual_sha = _file_sha256(fpath)
+            if actual_sha != fentry.get("sha256"):
+                raise BackupCorrupted(f"备份文件已被篡改或损坏: {fentry['rel_path']}")
+
+    restored_files: List[str] = []
+
+    # Restore workbuddy.db
+    bk_db = backup_path / "workbuddy.db"
+    if bk_db.is_file():
+        for suffix in ("-wal", "-shm"):
+            stale = Path(str(paths.db_path) + suffix)
+            if stale.exists():
+                stale.unlink(missing_ok=True)
+        shutil.copy2(str(bk_db), str(paths.db_path))
+        restored_files.append(str(paths.db_path.name))
+
+    meta_file = backup_path / "meta.json"
+    target_uid = ""
+    if manifest and manifest.get("target_uid"):
+        target_uid = manifest["target_uid"]
+    elif meta_file.exists():
+        try:
+            meta_data = json.loads(meta_file.read_text(encoding="utf-8"))
+            target_uid = meta_data.get("target_uid", "")
+        except Exception:
+            pass
+
+    if target_uid:
+        dst_mem = paths.memory_file(target_uid)
+        for cand in (backup_path / dst_mem.name, backup_path / f"{target_uid}.md", backup_path / f"{target_uid}_memory.md"):
+            if cand.is_file():
+                dst_mem.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(cand), str(dst_mem))
+                restored_files.append(f"memory/{dst_mem.name}")
+                break
+
+        bk_conn = backup_path / target_uid
+        if bk_conn.is_dir():
+            dst_conn = paths.connectors_user_dir(target_uid)
+            if dst_conn.exists():
+                shutil.rmtree(str(dst_conn))
+            shutil.copytree(str(bk_conn), str(dst_conn))
+            restored_files.append(f"connectors/{target_uid}")
+
+    return {
+        "ok": True,
+        "backup_id": safe_tag,
+        "restored_files": restored_files,
+        "edition": paths.edition,
+    }
+
+
+def list_backups(paths: AppPaths) -> List[Dict[str, Any]]:
+    """List all available backups for this edition."""
+    if not paths.backup_root.exists():
+        return []
+    items: List[Dict[str, Any]] = []
+    for d in paths.backup_root.iterdir():
+        if not d.is_dir():
+            continue
+        manifest_file = d / "manifest.json"
+        meta_file = d / "meta.json"
+        entry: Dict[str, Any] = {
+            "backup_id": d.name,
+            "created_at": "",
+            "target_uid": "",
+            "edition": paths.edition,
+            "file_count": len(list(d.rglob("*"))),
+        }
+        if manifest_file.is_file():
+            try:
+                m = json.loads(manifest_file.read_text(encoding="utf-8"))
+                entry["created_at"] = m.get("created_at", "")
+                entry["target_uid"] = m.get("target_uid", "")
+                entry["label"] = m.get("label", "")
+                entry["files"] = m.get("files", [])
+            except Exception:
+                pass
+        elif meta_file.is_file():
+            try:
+                m = json.loads(meta_file.read_text(encoding="utf-8"))
+                entry["created_at"] = m.get("created_at", "")
+                entry["target_uid"] = m.get("target_uid", "")
+            except Exception:
+                pass
+        items.append(entry)
+    items.sort(key=lambda x: x.get("created_at", "") or x.get("backup_id", ""), reverse=True)
+    return items
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> Set[str]:
@@ -324,6 +530,61 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
     return migrated, f"跨库复制 {migrated}，跳过 {skipped}", MigrateStatus.SUCCESS
 
 
+SHA256_HEX_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
+
+
+def find_reachable_blobs(source: AppPaths, session_ids: List[str]) -> List[Path]:
+    """Find blob files in source.blobs_dir referenced by the given session_ids."""
+    if not source.blobs_dir.exists() or not session_ids:
+        return []
+    sid_set = set(session_ids)
+    referenced_hashes: Set[str] = set()
+
+    # 1. Scan projects/* for session jsonl/txt files
+    if source.projects_dir.exists():
+        for proj in source.projects_dir.iterdir():
+            if not proj.is_dir():
+                continue
+            for item in proj.iterdir():
+                base = item.name.split(".")[0]
+                if (base in sid_set or item.name in sid_set) and item.is_file():
+                    try:
+                        content = item.read_text(encoding="utf-8", errors="ignore")
+                        for h in SHA256_HEX_RE.findall(content):
+                            referenced_hashes.add(h.lower())
+                    except Exception:
+                        pass
+
+    # 2. Scan tasks/{session_id}/**/*
+    if source.tasks_dir.exists():
+        for sid in session_ids:
+            try:
+                safe_sid = validate_path_component(sid, label="session_id")
+            except UnsafePath:
+                continue
+            task_dir = source.tasks_dir / safe_sid
+            if task_dir.is_dir():
+                for fpath in task_dir.rglob("*"):
+                    if fpath.is_file():
+                        try:
+                            content = fpath.read_text(encoding="utf-8", errors="ignore")
+                            for h in SHA256_HEX_RE.findall(content):
+                                referenced_hashes.add(h.lower())
+                        except Exception:
+                            pass
+
+    # 3. Match blobs in source.blobs_dir
+    matched: List[Path] = []
+    for h in referenced_hashes:
+        prefix = h[:2]
+        bucket = source.blobs_dir / prefix
+        if bucket.is_dir():
+            for blob_file in bucket.iterdir():
+                if blob_file.is_file() and blob_file.name.lower().startswith(h):
+                    matched.append(blob_file)
+    return matched
+
+
 def migrate_session_content(session_ids: List[str], source: AppPaths, target: AppPaths) -> int:
     if not session_ids:
         return 0
@@ -358,9 +619,17 @@ def migrate_session_content(session_ids: List[str], source: AppPaths, target: Ap
         for sid in session_ids:
             if _copy_if_missing(src_root / f"{sid}{suffix}", dst_root / f"{sid}{suffix}"):
                 copied += 1
+
+    # Selective blob reachability: only copy blobs referenced by migrated sessions
     if source.blobs_dir.exists():
-        # incremental; do not skip when target already has blobs/
-        copied += _merge_copy_dir(source.blobs_dir, target.blobs_dir)
+        target.blobs_dir.mkdir(parents=True, exist_ok=True)
+        reachable = find_reachable_blobs(source, session_ids)
+        for blob_file in reachable:
+            rel = blob_file.relative_to(source.blobs_dir)
+            dst_blob = target.blobs_dir / rel
+            dst_blob.parent.mkdir(parents=True, exist_ok=True)
+            if _copy_if_missing(blob_file, dst_blob):
+                copied += 1
     return copied
 
 
@@ -575,12 +844,24 @@ def _merge_installed_plugins(src_file: Path, dst_file: Path) -> int:
     return added
 
 
-def migrate_shared_plugins(source: AppPaths, target: AppPaths) -> int:
+def migrate_shared_plugins(
+    source: AppPaths,
+    target: AppPaths,
+    include_cache_and_data: bool = False,
+) -> int:
     if not source.plugins_dir.exists():
         return 0
     target.plugins_dir.mkdir(parents=True, exist_ok=True)
-    n = _merge_installed_plugins(source.plugins_dir / "installed_plugins.json", target.plugins_dir / "installed_plugins.json")
-    for sub in ("cache", "data", "marketplaces"):
+    n = _merge_installed_plugins(
+        source.plugins_dir / "installed_plugins.json",
+        target.plugins_dir / "installed_plugins.json",
+    )
+    # Conservative defaults: only copy marketplace descriptors by default,
+    # skip ephemeral cache and sensitive plugin persistent data.
+    sub_dirs = ("marketplaces",)
+    if include_cache_and_data:
+        sub_dirs = ("cache", "data", "marketplaces")
+    for sub in sub_dirs:
         n += _merge_copy_dir(source.plugins_dir / sub, target.plugins_dir / sub)
     n += _merge_copy_dir(source.connectors_marketplace_dir, target.connectors_marketplace_dir)
     return n
@@ -729,11 +1010,22 @@ def _status_for_count(n: int, empty_detail: str = "") -> str:
     return MigrateStatus.SKIPPED
 
 
-def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
+def run_migrate(
+    payload: Dict[str, Any],
+    progress_callback: Optional[Callable[[str, int, str], None]] = None,
+) -> Dict[str, Any]:
     """Execute migration. Fail-closed: only explicitly true items run.
 
     Preflight runs here again; plan results are never trusted.
     """
+    def notify(stage: str, percent: int, msg: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(stage, percent, msg)
+            except Exception:
+                pass
+
+    notify("preflight", 5, "正在进行前置检查与安全验证...")
     from_edition = payload["from_edition"]
     to_edition = payload["to_edition"]
     source_uid = payload["source_uid"]
@@ -742,6 +1034,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Fail-closed selection: no DEFAULT merge.
     selected = selected_true_items(payload.get("items"), KNOWN_ITEMS)
     if not selected:
+        notify("completed", 100, "未选择任何迁移项目")
         return {
             "ok": True,
             "status": "skipped",
@@ -766,6 +1059,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
     if selected & SESSION_SCOPED_ITEMS:
         session_ids = session_ids_for_uid(source, source_uid, strict=True)
 
+    notify("backup", 20, "正在创建 SQLite 一致性快照与 Manifest 备份...")
     warnings: List[str] = []
     backups: List[str] = []
     backups.append(create_backup(target, target_uid, "target"))
@@ -778,6 +1072,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
         results.append(MigrateItemResult(key, status, detail, count))
 
     if "sessions" in selected:
+        notify("sessions", 35, "正在迁移会话数据...")
         try:
             n, detail, status = migrate_sessions(source, target, source_uid, target_uid)
             add_result("sessions", status, detail, n)
@@ -785,6 +1080,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("sessions", MigrateStatus.FAILED, str(e), 0)
 
     if "session_content" in selected:
+        notify("session_content", 50, "正在迁移会话正文与引用附件...")
         try:
             n = migrate_session_content(session_ids, source, target)
             add_result(
@@ -797,6 +1093,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("session_content", MigrateStatus.FAILED, str(e), 0)
 
     if "user_memory" in selected:
+        notify("user_memory", 65, "正在合并用户记忆...")
         try:
             n, detail = migrate_memory(source, target, source_uid, target_uid)
             add_result("user_memory", _status_for_count(n), detail, n)
@@ -804,6 +1101,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("user_memory", MigrateStatus.FAILED, str(e), 0)
 
     if "mcp_connectors" in selected:
+        notify("mcp_connectors", 75, "正在合并 MCP 工具配置...")
         try:
             n, detail = migrate_connectors(source, target, source_uid, target_uid)
             add_result("mcp_connectors", _status_for_count(n), detail, n)
@@ -811,6 +1109,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("mcp_connectors", MigrateStatus.FAILED, str(e), 0)
 
     if "tasks" in selected:
+        notify("tasks", 82, "正在迁移任务上下文...")
         try:
             n = migrate_tasks(source, target, session_ids)
             add_result(
@@ -823,6 +1122,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("tasks", MigrateStatus.FAILED, str(e), 0)
 
     if "skills" in selected:
+        notify("skills", 88, "正在复制技能定义...")
         try:
             n = migrate_skills(source, target)
             add_result("skills", _status_for_count(n), f"新增 {n}", n)
@@ -830,6 +1130,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("skills", MigrateStatus.FAILED, str(e), 0)
 
     if "shared_plugins" in selected:
+        notify("shared_plugins", 92, "正在同步插件配置...")
         try:
             n = migrate_shared_plugins(source, target)
             add_result("shared_plugins", _status_for_count(n), f"新增 {n}", n)
@@ -837,6 +1138,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("shared_plugins", MigrateStatus.FAILED, str(e), 0)
 
     if "session_usage" in selected:
+        notify("session_usage", 96, "正在迁移 Token 用量记录...")
         try:
             n = migrate_session_usage(source, target, session_ids)
             add_result(
@@ -849,6 +1151,7 @@ def run_migrate(payload: Dict[str, Any]) -> Dict[str, Any]:
             add_result("session_usage", MigrateStatus.FAILED, str(e), 0)
 
     failed = [r for r in results if r.status == MigrateStatus.FAILED]
+    notify("completed", 100, "迁移已完成" if not failed else "迁移部分失败")
     return {
         "ok": not failed,
         "status": "failed" if failed else "success",
