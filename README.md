@@ -35,6 +35,8 @@ WorkBuddy Tools 是一款面向 **WorkBuddy / WorkBuddyAI** 的本地账号与�
 
 不再需要反复寻找配置文件或手动修改本地数据。
 
+> ![账号管理](docs/images/account-center.png)
+
 ### 数据迁移
 
 在不同账号或不同版本之间，按需迁移你真正需要的数据。
@@ -54,6 +56,8 @@ WorkBuddy Tools 是一款面向 **WorkBuddy / WorkBuddyAI** 的本地账号与�
 
 当前同版本账号之间暂不提供会话类数据迁移；Memory、MCP、Skills 等支持的数据仍可独立迁移。
 
+> ![选择性数据迁移](docs/images/migration.png)
+
 ### Token 用量
 
 直接从本地会话数据中整理 Token 使用情况。
@@ -63,6 +67,8 @@ WorkBuddy Tools 是一款面向 **WorkBuddy / WorkBuddyAI** 的本地账号与�
 - 按模型统计与用量占比
 
 不用逐个打开会话，也能快速了解不同模型的实际使用情况。
+
+> ![Token 用量统计](docs/images/token-usage.png)
 
 ### 本地优先
 
