@@ -2,6 +2,8 @@ import "./styles.css";
 import logoUrl from "./assets/logo.svg";
 import {
   api,
+  isDemoMode,
+  setDemoMode,
   type AccountInfo,
   type EditionInfo,
   type MigratePlan,
@@ -33,6 +35,7 @@ const state = {
   migTo: "international",
   tokenRange: "7d",
   tokenData: null as TokenSummary | null,
+  cleanCaptureMode: false,
 };
 
 function $(sel: string, root: ParentNode = document): HTMLElement {
@@ -125,7 +128,10 @@ function renderShell(): void {
         <button class="nav-item" data-page="tokens">Token 统计</button>
         <button class="nav-item" data-page="about">关于</button>
       </nav>
-      <div class="side-foot"><span id="client-pill" class="pill">检测中…</span></div>
+      <div class="side-foot" style="display:flex;flex-direction:column;gap:6px">
+        <span id="client-pill" class="pill">检测中…</span>
+        <button id="btn-demo-toggle" class="btn ghost small" style="font-size:11.5px;padding:3px 6px;text-align:center" title="在真实环境与虚拟演示数据间切换">🎨 切换演示数据</button>
+      </div>
     </aside>
     <main class="main">
       <header class="topbar">
@@ -134,6 +140,8 @@ function renderShell(): void {
           <p id="page-desc">查看双端账号并一键切换</p>
         </div>
         <div class="top-actions">
+          <span id="demo-badge" class="badge ok ${isDemoMode() ? "" : "hidden"}" style="font-size:11.5px;padding:4px 8px;font-weight:600" title="当前显示完整虚拟演示数据">🎨 演示模式</span>
+          <button id="btn-capture-mode" class="btn ghost small ${isDemoMode() ? "" : "hidden"}" style="font-size:11.5px;padding:3px 8px" title="隐藏辅助按钮，截取纯净宣传图">📷 纯净截图</button>
           <select id="edition-select" class="select"></select>
           <button id="btn-refresh" class="btn ghost">刷新</button>
         </div>
@@ -675,16 +683,109 @@ function bind(): void {
       toast((e as Error).message);
     }
   });
+
+  $("#btn-demo-toggle").addEventListener("click", async () => {
+    const next = !isDemoMode();
+    setDemoMode(next);
+    updateDemoControls();
+    toast(next ? "已切换为【虚拟演示数据】" : "已切换为【真实本地环境】");
+    try {
+      await loadEditions();
+      await loadAccounts();
+      if (state.page === "tokens") void loadTokens();
+      if (state.page === "migrate") void fillMigrateSelects();
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  });
+
+  $("#btn-capture-mode").addEventListener("click", () => {
+    state.cleanCaptureMode = !state.cleanCaptureMode;
+    updateDemoControls();
+    if (state.cleanCaptureMode) {
+      toast("已开启纯净截图模式（按 ESC 退出）");
+    }
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.cleanCaptureMode) {
+      state.cleanCaptureMode = false;
+      updateDemoControls();
+      toast("已退出纯净截图模式");
+    }
+  });
+}
+
+function updateDemoControls(): void {
+  const isDemo = isDemoMode();
+  const demoBadge = $("#demo-badge");
+  const captureBtn = $("#btn-capture-mode");
+  const demoToggle = $("#btn-demo-toggle");
+
+  if (state.cleanCaptureMode) {
+    demoBadge.classList.add("hidden");
+    captureBtn.classList.add("hidden");
+    demoToggle.classList.add("hidden");
+  } else {
+    demoBadge.classList.toggle("hidden", !isDemo);
+    captureBtn.classList.toggle("hidden", !isDemo);
+    demoToggle.classList.remove("hidden");
+  }
 }
 
 async function init(): Promise<void> {
   renderShell();
   bind();
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("clean")) {
+    state.cleanCaptureMode = true;
+  }
+  updateDemoControls();
   try {
     await loadEditions();
     await loadAccounts();
   } catch (e) {
-    toast("无法连接本地服务：" + (e as Error).message);
+    if (!isDemoMode()) {
+      setDemoMode(true);
+      updateDemoControls();
+      toast("未连接本地服务，已自动加载【虚拟演示数据】供预览与截图");
+      try {
+        await loadEditions();
+        await loadAccounts();
+      } catch (inner) {
+        toast("加载失败：" + (inner as Error).message);
+      }
+    } else {
+      toast("无法连接本地服务：" + (e as Error).message);
+    }
+  }
+
+  // Support direct URL routing for screenshots / demo links
+  const targetPage = params.get("page");
+  if (targetPage && ["accounts", "migrate", "tokens", "about"].includes(targetPage)) {
+    setPage(targetPage);
+  }
+  if (targetPage === "migrate") {
+    const fromParam = params.get("from");
+    const toParam = params.get("to");
+    if (fromParam) ($("#mig-from") as HTMLSelectElement).value = fromParam;
+    if (toParam) ($("#mig-to") as HTMLSelectElement).value = toParam;
+    await fillMigrateSelects();
+    const sourceParam = params.get("source");
+    const targetParam = params.get("target");
+    if (sourceParam) ($("#mig-source") as HTMLSelectElement).value = sourceParam;
+    if (targetParam) ($("#mig-target") as HTMLSelectElement).value = targetParam;
+    if (params.has("plan")) {
+      await loadPlan();
+    }
+  }
+  if (targetPage === "tokens") {
+    const rangeParam = params.get("range");
+    if (rangeParam && ["today", "24h", "7d", "30d", "90d"].includes(rangeParam)) {
+      state.tokenRange = rangeParam;
+      ($("#token-range") as HTMLSelectElement).value = rangeParam;
+    }
+    await loadTokens();
   }
 }
 

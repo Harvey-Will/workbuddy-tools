@@ -35,6 +35,8 @@ Automatically detect local WorkBuddy and WorkBuddyAI data and present editions a
 
 No more hunting for config files or editing local data by hand.
 
+> ![Account Management](docs/images/account-center.png)
+
 ### Data migration
 
 Move only the data you need between accounts or editions.
@@ -54,6 +56,8 @@ Preview first, then choose what to migrate. Existing target data is preserved wh
 
 Same-edition session-related migration is not available in this version. Memory, MCP, Skills, and other supported types can still be migrated independently.
 
+> ![Selective Data Migration](docs/images/migration.png)
+
 ### Token usage
 
 Summarize Token usage from local session data.
@@ -63,6 +67,8 @@ Summarize Token usage from local session data.
 - Per-model totals and share
 
 Understand model usage without opening every session.
+
+> ![Token Usage Statistics](docs/images/token-usage.png)
 
 ### Local-first
 

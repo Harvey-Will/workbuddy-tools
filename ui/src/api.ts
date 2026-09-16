@@ -1,4 +1,5 @@
 /** HTTP client for local WorkBuddy Tools API (sidecar). */
+import { mockStore } from "./mockData";
 
 export type EditionKey = "domestic" | "international";
 
@@ -205,46 +206,77 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   throw new ApiError(lastErr instanceof Error ? lastErr.message : "无法连接本地服务");
 }
 
+export function isDemoMode(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("demo") || params.has("mock")) return true;
+  return localStorage.getItem("wbt_demo_mode") === "true";
+}
+
+export function setDemoMode(enable: boolean): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("wbt_demo_mode", enable ? "true" : "false");
+}
+
 export const api = {
-  health: () => request<{ ok: boolean; editions: string[] }>("/api/health"),
-  editions: () => request<{ editions: EditionInfo[] }>("/api/editions"),
-  accounts: (edition: string) =>
-    request<{
+  health: () => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getHealth());
+    return request<{ ok: boolean; editions: string[] }>("/api/health");
+  },
+  editions: () => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getEditions());
+    return request<{ editions: EditionInfo[] }>("/api/editions");
+  },
+  accounts: (edition: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getAccounts(edition));
+    return request<{
       edition: string;
       current_uid: string;
       accounts: AccountInfo[];
       client_running: boolean;
-    }>(`/api/accounts?edition=${encodeURIComponent(edition)}`),
-  switchAccount: (edition: string, target_uid: string) =>
-    request<{ ok: boolean; message: string; need_restart: boolean }>(
+    }>(`/api/accounts?edition=${encodeURIComponent(edition)}`);
+  },
+  switchAccount: (edition: string, target_uid: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.switchAccount(edition, target_uid));
+    return request<{ ok: boolean; message: string; need_restart: boolean }>(
       "/api/accounts/switch",
       { method: "POST", body: JSON.stringify({ edition, target_uid }) },
-    ),
-  rename: (edition: string, uid: string, label: string) =>
-    request<{ ok: boolean; display_name: string }>("/api/accounts/rename", {
+    );
+  },
+  rename: (edition: string, uid: string, label: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.rename(edition, uid, label));
+    return request<{ ok: boolean; display_name: string }>("/api/accounts/rename", {
       method: "POST",
       body: JSON.stringify({ edition, uid, label }),
-    }),
-  addProfile: (edition: string, uid: string, label: string) =>
-    request<{ ok: boolean }>("/api/accounts/add", {
+    });
+  },
+  addProfile: (edition: string, uid: string, label: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.addProfile(edition, uid, label));
+    return request<{ ok: boolean }>("/api/accounts/add", {
       method: "POST",
       body: JSON.stringify({ edition, uid, label }),
-    }),
-  openClient: (edition: string) =>
-    request<{ ok: boolean; exe: string }>("/api/accounts/open-client", {
+    });
+  },
+  openClient: (edition: string) => {
+    if (isDemoMode()) return Promise.resolve({ ok: true, exe: "mock_client.exe" });
+    return request<{ ok: boolean; exe: string }>("/api/accounts/open-client", {
       method: "POST",
       body: JSON.stringify({ edition }),
-    }),
-  workspaces: (edition: string) =>
-    request<{ workspaces: WorkspaceInfo[] }>(
+    });
+  },
+  workspaces: (edition: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getWorkspaces(edition));
+    return request<{ workspaces: WorkspaceInfo[] }>(
       `/api/workspaces?edition=${encodeURIComponent(edition)}`,
-    ),
+    );
+  },
   migratePlan: (q: {
     from_edition: string;
     to_edition: string;
     source_uid: string;
     target_uid?: string;
   }) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getMigratePlan(q));
     const p = new URLSearchParams({
       from_edition: q.from_edition,
       to_edition: q.to_edition,
@@ -259,12 +291,15 @@ export const api = {
     source_uid: string;
     target_uid?: string;
     items: Record<string, boolean>;
-  }) =>
-    request<MigrateRunResult>("/api/migrate/run", {
+  }) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.runMigrate());
+    return request<MigrateRunResult>("/api/migrate/run", {
       method: "POST",
       body: JSON.stringify({ ...body, mode: "copy" }),
-    }),
+    });
+  },
   tokens: (edition: string, range: string, dateFrom?: string, dateTo?: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getTokens(edition, range));
     const p = new URLSearchParams({ edition, range });
     if (dateFrom) p.set("date_from", dateFrom);
     if (dateTo) p.set("date_to", dateTo);
