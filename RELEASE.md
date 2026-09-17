@@ -5,6 +5,9 @@
 - 软件形态：单文件绿色免安装便携版（开箱即用，内置完整独立运行时）
 - 完整更新日志与多版本演进历程：详见 [CHANGELOG.md](CHANGELOG.md)
 
+> [!IMPORTANT]
+> **GitHub Releases 命名强制准则**：Release Title 必须且仅包含版本号（如 `v0.1.3`），杜绝追加任何中文描述或标语，确保 GitHub 左侧「Release list」目录树整洁纯净，不被折叠或截断。详细说明一律写入 Release 说明正文。
+
 ---
 
 ## 快速构建指南
