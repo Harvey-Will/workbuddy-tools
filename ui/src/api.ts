@@ -77,9 +77,39 @@ export interface MigrateRunResult {
   need_restart?: boolean;
 }
 
+export interface TokenModelItem {
+  model: string;
+  color: string;
+  input: number;
+  output: number;
+  cache_read: number;
+  total: number;
+  cache_hit_rate: number;
+  ratio?: number;
+  percent?: number;
+}
+
+export interface TokenDayItem {
+  date: string;
+  total: number;
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_hit_rate?: number;
+  by_model: Array<{
+    model: string;
+    color: string;
+    total: number;
+    input: number;
+    output: number;
+    cache_read?: number;
+    cache_hit_rate?: number;
+  }>;
+}
+
 export interface TokenSummary {
   edition: string;
-  range: { key: string; from: string; to: string };
+  range: { key: string; from: string; to: string; from_ms?: number; to_ms?: number };
   totals: {
     input: number;
     output: number;
@@ -87,27 +117,72 @@ export interface TokenSummary {
     total: number;
     cache_hit_rate: number;
     events: number;
+    daily_average?: number;
   };
-  by_model: Array<{
-    model: string;
-    color: string;
-    input: number;
-    output: number;
-    cache_read: number;
-    total: number;
-    cache_hit_rate: number;
-  }>;
-  by_day: Array<{
-    date: string;
-    total: number;
-    by_model: Array<{ model: string; color: string; total: number; input: number; output: number }>;
-  }>;
+  by_model: TokenModelItem[];
+  by_day: TokenDayItem[];
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_name?: string;
+  release_notes?: string;
+  published_at?: string;
+  html_url?: string;
+  download_url?: string;
+  error?: string | null;
+}
+
+export type JobStatus = "pending" | "running" | "completed" | "failed";
+
+export interface MigrateJobInfo {
+  job_id: string;
+  status: JobStatus;
+  stage: string;
+  progress: number;
+  message: string;
+  created_at: string;
+  updated_at: string;
+  payload?: {
+    from_edition: string;
+    to_edition: string;
+    source_uid: string;
+    target_uid?: string;
+    items?: Record<string, boolean>;
+  };
+  result?: MigrateRunResult | null;
+  error?: { code: string; message: string } | null;
+}
+
+export interface BackupFileEntry {
+  rel_path: string;
+  target_role: string;
+  sha256?: string;
+  size_bytes?: number;
+}
+
+export interface BackupItem {
+  backup_id: string;
+  created_at: string;
+  target_uid: string;
+  label?: string;
+  edition: string;
+  file_count: number;
+  size_bytes?: number;
+  files?: BackupFileEntry[];
 }
 
 export class ApiError extends Error {
-  constructor(message: string) {
+  code?: string;
+  status?: number;
+
+  constructor(message: string, code?: string, status?: number) {
     super(message);
     this.name = "ApiError";
+    this.code = code;
+    this.status = status;
   }
 }
 
@@ -150,10 +225,11 @@ async function invokeProxy<T>(path: string, init?: RequestInit): Promise<T> {
     data = { raw: res.body };
   }
   if (res.status >= 400) {
-    const detail = (data as { detail?: { message?: string } | string })?.detail;
+    const detail = (data as { detail?: { code?: string; message?: string } | string })?.detail;
     const msg =
       typeof detail === "string" ? detail : detail?.message || `HTTP ${res.status}`;
-    throw new ApiError(msg);
+    const code = typeof detail === "object" ? detail?.code : undefined;
+    throw new ApiError(msg, code, res.status);
   }
   return data as T;
 }
@@ -190,12 +266,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         data = { raw: text };
       }
       if (!res.ok) {
-        const detail = (data as { detail?: { message?: string } | string })?.detail;
+        const detail = (data as { detail?: { code?: string; message?: string } | string })?.detail;
         const msg =
           typeof detail === "string"
             ? detail
             : detail?.message || res.statusText || "请求失败";
-        throw new ApiError(msg);
+        const code = typeof detail === "object" ? detail?.code : undefined;
+        throw new ApiError(msg, code, res.status);
       }
       return data as T;
     } catch (e) {
@@ -207,15 +284,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function isDemoMode(): boolean {
-  if (typeof window === "undefined") return false;
-  const params = new URLSearchParams(window.location.search);
-  if (params.has("demo") || params.has("mock")) return true;
-  return localStorage.getItem("wbt_demo_mode") === "true";
+  return false;
 }
 
-export function setDemoMode(enable: boolean): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem("wbt_demo_mode", enable ? "true" : "false");
+export function setDemoMode(_enable: boolean): void {
+  // Release build: demo mode permanently disabled
 }
 
 export const api = {
@@ -304,5 +377,64 @@ export const api = {
     if (dateFrom) p.set("date_from", dateFrom);
     if (dateTo) p.set("date_to", dateTo);
     return request<TokenSummary>(`/api/tokens/summary?${p}`);
+  },
+  migrateCreateJob: (body: {
+    from_edition: string;
+    to_edition: string;
+    source_uid: string;
+    target_uid?: string;
+    items: Record<string, boolean>;
+  }) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.createMigrateJob(body));
+    return request<{ job_id: string; status: string }>("/api/migrate/jobs", {
+      method: "POST",
+      body: JSON.stringify({ ...body, mode: "copy" }),
+    });
+  },
+  migrateGetJob: (jobId: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getMigrateJob(jobId));
+    return request<MigrateJobInfo>(`/api/migrate/jobs/${encodeURIComponent(jobId)}`);
+  },
+  migrateListJobs: () => {
+    if (isDemoMode()) return Promise.resolve(mockStore.listMigrateJobs());
+    return request<{ jobs: MigrateJobInfo[] }>("/api/migrate/jobs");
+  },
+  backups: (edition: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getBackups(edition));
+    return request<{ edition: string; backups: BackupItem[] }>(
+      `/api/backups?edition=${encodeURIComponent(edition)}`,
+    );
+  },
+  restoreBackup: (edition: string, backupId: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.restoreBackup(edition, backupId));
+    return request<{ ok: boolean; backup_id: string; restored_files: string[]; edition: string }>(
+      "/api/backups/restore",
+      { method: "POST", body: JSON.stringify({ edition, backup_id: backupId }) },
+    );
+  },
+  createBackup: (edition: string, targetUid?: string, label?: string) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.createBackup(edition, targetUid, label));
+    return request<{ ok: boolean; backup_id: string; path: string; edition: string }>(
+      "/api/backups/create",
+      { method: "POST", body: JSON.stringify({ edition, target_uid: targetUid, label: label || "manual" }) },
+    );
+  },
+  checkUpdate: async (): Promise<UpdateCheckResult> => {
+    return await request<UpdateCheckResult>("/api/system/check-update");
+  },
+  openUrl: async (url: string): Promise<void> => {
+    try {
+      await request<{ ok: boolean }>("/api/system/open-url", {
+        method: "POST",
+        body: JSON.stringify({ url }),
+      });
+    } catch {
+      if (typeof window !== "undefined") {
+        window.open(url, "_blank");
+      }
+    }
+  },
+  systemVersion: (): Promise<{ version: string; repo_url: string }> => {
+    return request<{ version: string; repo_url: string }>("/api/system/version");
   },
 };

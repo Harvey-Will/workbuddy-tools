@@ -1,6 +1,8 @@
 import type {
   AccountInfo,
+  BackupItem,
   EditionInfo,
+  MigrateJobInfo,
   MigratePlan,
   MigrateRunResult,
   TokenSummary,
@@ -163,6 +165,47 @@ class MockStore {
     ],
   };
 
+  jobs: Record<string, MigrateJobInfo & { stepIndex: number }> = {};
+
+  backupsByEdition: Record<string, BackupItem[]> = {
+    domestic: [
+      {
+        backup_id: "20260916120000_pre_migrate_11111111_a1b2c3",
+        created_at: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+        target_uid: "11111111-aaaa-4000-8000-000000000001",
+        label: "pre_migrate",
+        edition: "domestic",
+        file_count: 36,
+        size_bytes: 42598400,
+        files: [
+          { rel_path: "workbuddy.db", target_role: "workbuddy.db", size_bytes: 42467328 },
+          { rel_path: "memory/11111111-aaaa-4000-8000-000000000001.md", target_role: "memory/profile", size_bytes: 38912 },
+          { rel_path: "connectors/11111111-aaaa-4000-8000-000000000001/mcp.json", target_role: "connectors", size_bytes: 92160 },
+        ],
+      },
+      {
+        backup_id: "20260914093000_manual_snapshot_11111111_d4e5f6",
+        created_at: new Date(Date.now() - 3 * 86400 * 1000).toISOString(),
+        target_uid: "11111111-aaaa-4000-8000-000000000001",
+        label: "manual_snapshot",
+        edition: "domestic",
+        file_count: 34,
+        size_bytes: 38850000,
+      },
+    ],
+    international: [
+      {
+        backup_id: "20260915180000_pre_migrate_88888888_f7g8h9",
+        created_at: new Date(Date.now() - 40 * 3600 * 1000).toISOString(),
+        target_uid: "88888888-dddd-4000-8000-000000000001",
+        label: "pre_migrate",
+        edition: "international",
+        file_count: 52,
+        size_bytes: 71200000,
+      },
+    ],
+  };
+
   getHealth(): { ok: boolean; editions: string[] } {
     return { ok: true, editions: ["domestic", "international"] };
   }
@@ -295,6 +338,125 @@ class MockStore {
     };
   }
 
+  createMigrateJob(body: {
+    from_edition: string;
+    to_edition: string;
+    source_uid: string;
+    target_uid?: string;
+    items: Record<string, boolean>;
+  }): { job_id: string; status: string } {
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    const rand = Math.random().toString(36).slice(2, 6);
+    const jobId = `job_${stamp}_${rand}`;
+    this.jobs[jobId] = {
+      job_id: jobId,
+      status: "running",
+      stage: "preflight",
+      progress: 5,
+      message: "正在执行前置安全检查与 SQLite 连通性校验...",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      payload: {
+        from_edition: body.from_edition,
+        to_edition: body.to_edition,
+        source_uid: body.source_uid,
+        target_uid: body.target_uid,
+        items: body.items,
+      },
+      stepIndex: 0,
+      result: null,
+      error: null,
+    };
+    return { job_id: jobId, status: "pending" };
+  }
+
+  getMigrateJob(jobId: string): MigrateJobInfo {
+    const job = this.jobs[jobId];
+    if (!job) {
+      throw new Error("作业不存在");
+    }
+    const STAGES = [
+      { stage: "preflight", progress: 5, message: "正在执行前置安全检查与 SQLite 连通性校验..." },
+      { stage: "backup", progress: 20, message: "正在创建 SQLite 在线原子热备份与快照清单..." },
+      { stage: "sessions", progress: 35, message: "正在合并数据库聊天会话..." },
+      { stage: "session_content", progress: 50, message: "正在同步会话正文与关联 Blobs 附件..." },
+      { stage: "user_memory", progress: 65, message: "正在增量合并用户长期记忆 Profile..." },
+      { stage: "mcp_connectors", progress: 75, message: "正在深度合并 MCP 扩展与连接器配置..." },
+      { stage: "tasks", progress: 82, message: "正在关联历史任务与工作空间记录..." },
+      { stage: "skills", progress: 88, message: "正在同步自定义技能定义..." },
+      { stage: "shared_plugins", progress: 92, message: "正在同步共享插件与市场扩展..." },
+      { stage: "session_usage", progress: 96, message: "正在聚合 Token 用量记录..." },
+      { stage: "completed", progress: 100, message: "数据迁移与完整性校验全部完成！" },
+    ];
+    if (job.status === "running") {
+      job.stepIndex += 1;
+      if (job.stepIndex >= STAGES.length - 1) {
+        const last = STAGES[STAGES.length - 1];
+        job.stage = last.stage;
+        job.progress = last.progress;
+        job.message = last.message;
+        job.status = "completed";
+        job.result = this.runMigrate();
+      } else {
+        const cur = STAGES[job.stepIndex];
+        job.stage = cur.stage;
+        job.progress = cur.progress;
+        job.message = cur.message;
+      }
+      job.updated_at = new Date().toISOString();
+    }
+    return { ...job };
+  }
+
+  listMigrateJobs(): { jobs: MigrateJobInfo[] } {
+    const list = Object.values(this.jobs).map((j) => ({ ...j }));
+    list.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+    return { jobs: list };
+  }
+
+  getBackups(edition: string): { edition: string; backups: BackupItem[] } {
+    return {
+      edition,
+      backups: JSON.parse(JSON.stringify(this.backupsByEdition[edition] || [])),
+    };
+  }
+
+  restoreBackup(edition: string, backupId: string): { ok: boolean; backup_id: string; restored_files: string[]; edition: string } {
+    return {
+      ok: true,
+      backup_id: backupId,
+      restored_files: ["workbuddy.db", "memory/profile.md", "connectors/mcp.json"],
+      edition,
+    };
+  }
+
+  createBackup(edition: string, targetUid?: string, label?: string): { ok: boolean; backup_id: string; path: string; edition: string } {
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    const rand = Math.random().toString(36).slice(2, 8);
+    const safeUid = (targetUid || "default").slice(0, 8);
+    const safeLabel = label || "manual";
+    const backupId = `${stamp}_${safeLabel}_${safeUid}_${rand}`;
+    const newItem: BackupItem = {
+      backup_id: backupId,
+      created_at: new Date().toISOString(),
+      target_uid: targetUid || "11111111-aaaa-4000-8000-000000000001",
+      label: safeLabel,
+      edition,
+      file_count: 35,
+      size_bytes: 41943040,
+    };
+    if (!this.backupsByEdition[edition]) {
+      this.backupsByEdition[edition] = [];
+    }
+    this.backupsByEdition[edition].unshift(newItem);
+    return {
+      ok: true,
+      backup_id: backupId,
+      path: `~/.workbuddy/backups/${backupId}`,
+      edition,
+    };
+  }
+
   getTokens(edition: string, range: string): TokenSummary {
     const models = [
       { model: "claude-3-7-sonnet", color: "#4F46E5", ratio: 0.38 },
@@ -336,6 +498,8 @@ class MockStore {
       const mInput = Math.round(mTotal * 0.56);
       const mOutput = Math.round(mTotal * 0.18);
       const mCache = Math.round(mTotal * 0.26);
+      const prompt = mInput >= mCache ? mInput : mInput + mCache;
+      const hitRate = prompt > 0 ? Math.round((mCache / prompt) * 1000) / 1000 : 0;
       return {
         model: m.model,
         color: m.color,
@@ -343,7 +507,9 @@ class MockStore {
         output: mOutput,
         cache_read: mCache,
         total: mTotal,
-        cache_hit_rate: 0.55 + m.ratio * 0.15,
+        ratio: m.ratio,
+        percent: Math.round(m.ratio * 1000) / 10,
+        cache_hit_rate: hitRate,
       };
     });
 
@@ -357,18 +523,34 @@ class MockStore {
 
       const dayByModel = models.map((m) => {
         const dTotal = Math.round(dayTotal * m.ratio);
+        const dIn = Math.round(dTotal * 0.56);
+        const dOut = Math.round(dTotal * 0.18);
+        const dCache = Math.round(dTotal * 0.26);
+        const dMPr = dIn >= dCache ? dIn : dIn + dCache;
         return {
           model: m.model,
           color: m.color,
           total: dTotal,
-          input: Math.round(dTotal * 0.6),
-          output: Math.round(dTotal * 0.4),
+          input: dIn,
+          output: dOut,
+          cache_read: dCache,
+          cache_hit_rate: dMPr > 0 ? Math.round((dCache / dMPr) * 1000) / 1000 : 0,
         };
       });
+
+      const dInput = Math.round(dayTotal * 0.56);
+      const dOutput = Math.round(dayTotal * 0.18);
+      const dCache = Math.round(dayTotal * 0.26);
+      const dPrompt = dInput >= dCache ? dInput : dInput + dCache;
+      const dHit = dPrompt > 0 ? Math.round((dCache / dPrompt) * 1000) / 1000 : 0;
 
       by_day.push({
         date: dateStr,
         total: dayTotal,
+        input: dInput,
+        output: dOutput,
+        cache_read: dCache,
+        cache_hit_rate: dHit,
         by_model: dayByModel,
       });
     }
@@ -383,9 +565,34 @@ class MockStore {
         cache_read,
         cache_hit_rate,
         events,
+        daily_average: Math.round(baseTotal / Math.max(1, dayCount)),
       },
       by_model,
       by_day,
+    };
+  }
+
+  checkUpdate(): {
+    current_version: string;
+    latest_version: string;
+    has_update: boolean;
+    release_name: string;
+    release_notes: string;
+    published_at: string;
+    html_url: string;
+    download_url: string;
+    error: null;
+  } {
+    return {
+      current_version: "0.1.3",
+      latest_version: "0.1.3",
+      has_update: false,
+      release_name: "v0.1.3 正式版",
+      release_notes: "🎉 当前为最新正式版。\n- 优化双端账号与工作空间管理\n- 新增精美 Token 统计与多尺度缩放\n- 新增版本号展示与 GitHub 开源快捷入口\n- 强化在线原子快照与迁移流水线",
+      published_at: new Date().toISOString(),
+      html_url: "https://github.com/Harvey-Will/workbuddy-tools/releases",
+      download_url: "https://github.com/Harvey-Will/workbuddy-tools/releases/latest",
+      error: null,
     };
   }
 }

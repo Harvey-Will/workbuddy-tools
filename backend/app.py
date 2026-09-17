@@ -26,6 +26,7 @@ else:
 from core import accounts as accounts_mod
 from core import migrate as migrate_mod
 from core import tokens as tokens_mod
+from core import update as update_mod
 from core.editions import (
     client_looks_running,
     detect_editions,
@@ -47,7 +48,7 @@ from core.safety import (
     WriteConflict,
 )
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
 # Optional loopback auth token (set by desktop shell). Empty = open (dev/CLI).
@@ -105,6 +106,16 @@ class MigrateRunBody(BaseModel):
 class RestoreBody(BaseModel):
     edition: str
     backup_id: str
+
+
+class CreateBackupBody(BaseModel):
+    edition: str
+    target_uid: Optional[str] = None
+    label: str = "manual"
+
+
+class OpenUrlBody(BaseModel):
+    url: str
 
 
 @app.middleware("http")
@@ -192,8 +203,13 @@ def _map_safety(e: SafetyError) -> HTTPException:
 
 @app.post("/api/accounts/switch")
 def api_switch(body: SwitchBody) -> Dict[str, Any]:
-    ed = _norm(body.edition)
+    if not _migrate_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "busy", "message": "已有任务正在进行中，请稍后再试"},
+        )
     try:
+        ed = _norm(body.edition)
         return accounts_mod.switch_account(ed, body.target_uid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": "edition not found"})
@@ -201,6 +217,8 @@ def api_switch(body: SwitchBody) -> Dict[str, Any]:
         raise _map_safety(e)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": "uid_required", "message": str(e)})
+    finally:
+        _migrate_lock.release()
 
 
 @app.post("/api/accounts/add")
@@ -277,13 +295,6 @@ def _run_job_worker(job_id: str, payload: Dict[str, Any]) -> None:
                 _jobs[job_id]["message"] = msg
                 _jobs[job_id]["updated_at"] = datetime.now().isoformat()
 
-    if not _migrate_lock.acquire(blocking=False):
-        with _jobs_lock:
-            _jobs[job_id]["status"] = "failed"
-            _jobs[job_id]["error"] = {"code": "busy", "message": "已有迁移在进行中，请稍后再试"}
-            _jobs[job_id]["updated_at"] = datetime.now().isoformat()
-        return
-
     try:
         with _jobs_lock:
             _jobs[job_id]["status"] = "running"
@@ -309,8 +320,14 @@ def _run_job_worker(job_id: str, payload: Dict[str, Any]) -> None:
 
 @app.post("/api/migrate/jobs")
 def api_migrate_create_job(body: MigrateRunBody) -> Dict[str, Any]:
+    if not _migrate_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "busy", "message": "已有任务正在进行中，请稍后再试"},
+        )
     fe, te = _norm(body.from_edition), _norm(body.to_edition)
     if body.mode not in ("copy",):
+        _migrate_lock.release()
         raise HTTPException(status_code=400, detail={"code": "bad_mode", "message": "v0.1 仅支持 copy"})
     payload = {
         "from_edition": fe,
@@ -330,14 +347,18 @@ def api_migrate_create_job(body: MigrateRunBody) -> Dict[str, Any]:
         "message": "已排队，等待启动...",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
-        "payload": {k: v for k, v in payload.items() if k != "items"},
+        "payload": payload,
         "result": None,
         "error": None,
     }
     with _jobs_lock:
         _jobs[job_id] = job_info
-    thread = threading.Thread(target=_run_job_worker, args=(job_id, payload), daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=_run_job_worker, args=(job_id, payload), daemon=True)
+        thread.start()
+    except Exception:
+        _migrate_lock.release()
+        raise
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -392,14 +413,50 @@ def api_backups(edition: str = Query(...)) -> Dict[str, Any]:
     return {"edition": ed, "backups": migrate_mod.list_backups(paths)}
 
 
+@app.post("/api/backups/create")
+def api_backups_create(body: CreateBackupBody) -> Dict[str, Any]:
+    if not _migrate_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "busy", "message": "已有任务正在进行中，请稍后再试"},
+        )
+    try:
+        ed = _norm(body.edition)
+        paths = make_paths(ed)
+        target_uid = (body.target_uid or "").strip()
+        if not target_uid:
+            snap = accounts_mod.read_account_snapshot(paths)
+            target_uid = snap.get("uid") or accounts_mod.get_current_uid(paths) or "default"
+        label = (body.label or "manual").strip()
+        bk_path_str = migrate_mod.create_backup(paths, target_uid=target_uid, label=label)
+        bk_path = Path(bk_path_str)
+        return {
+            "ok": True,
+            "backup_id": bk_path.name,
+            "path": bk_path_str,
+            "edition": ed,
+        }
+    except SafetyError as e:
+        raise _map_safety(e)
+    finally:
+        _migrate_lock.release()
+
+
 @app.post("/api/backups/restore")
 def api_backups_restore(body: RestoreBody) -> Dict[str, Any]:
-    ed = _norm(body.edition)
-    paths = make_paths(ed)
+    if not _migrate_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "busy", "message": "已有任务正在进行中，请稍后再试"},
+        )
     try:
+        ed = _norm(body.edition)
+        paths = make_paths(ed)
         return migrate_mod.restore_backup(paths, body.backup_id)
     except SafetyError as e:
         raise _map_safety(e)
+    finally:
+        _migrate_lock.release()
 
 
 @app.get("/api/tokens/summary")
@@ -413,6 +470,33 @@ def api_tokens(
     if range not in ("today", "24h", "7d", "30d", "90d", "custom"):
         raise HTTPException(status_code=400, detail={"code": "bad_range", "message": "invalid range"})
     return tokens_mod.summarize_tokens(ed, range, date_from, date_to)
+
+
+@app.get("/api/system/version")
+def api_system_version() -> Dict[str, Any]:
+    return {
+        "version": APP_VERSION,
+        "repo_url": "https://github.com/Harvey-Will/workbuddy-tools",
+    }
+
+
+@app.get("/api/system/check-update")
+def api_check_update() -> Dict[str, Any]:
+    return update_mod.check_github_update(APP_VERSION)
+
+
+@app.post("/api/system/open-url")
+def api_open_url(body: OpenUrlBody) -> Dict[str, Any]:
+    url = body.url.strip()
+    if not (url.startswith("https://") or url.startswith("http://")):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_url", "message": "Only HTTP/HTTPS URLs allowed"},
+        )
+    import webbrowser
+
+    webbrowser.open(url)
+    return {"ok": True}
 
 
 @app.get("/")
