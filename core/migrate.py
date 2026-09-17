@@ -109,11 +109,13 @@ def create_backup(paths: AppPaths, target_uid: str, label: str = "migrate") -> s
             f"检测到 {paths.edition} 客户端正在运行。为了数据安全，备份和迁移前请完全退出客户端。"
         )
     target_uid = validate_uid(target_uid)
+    label = validate_path_component(label, label="label")
     paths.backup_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     rand_suffix = uuid.uuid4().hex[:6]
     tag = f"{stamp}_{label}_{target_uid[:8]}_{rand_suffix}"
     backup_path = paths.backup_root / tag
+    ensure_within(paths.backup_root, backup_path)
     backup_path.mkdir(parents=True, exist_ok=True)
 
     file_manifests: List[Dict[str, Any]] = []
@@ -175,6 +177,7 @@ def create_backup(paths: AppPaths, target_uid: str, label: str = "migrate") -> s
     meta = {
         "timestamp": stamp,
         "target_uid": target_uid,
+        "label": label,
         "edition": paths.edition,
         "created_at": manifest["created_at"],
         "backup_id": tag,
@@ -272,12 +275,15 @@ def list_backups(paths: AppPaths) -> List[Dict[str, Any]]:
             continue
         manifest_file = d / "manifest.json"
         meta_file = d / "meta.json"
+        disk_files = [p for p in d.rglob("*") if p.is_file()]
         entry: Dict[str, Any] = {
             "backup_id": d.name,
             "created_at": "",
             "target_uid": "",
+            "label": "",
             "edition": paths.edition,
-            "file_count": len(list(d.rglob("*"))),
+            "file_count": len(disk_files),
+            "size_bytes": 0,
         }
         if manifest_file.is_file():
             try:
@@ -286,15 +292,24 @@ def list_backups(paths: AppPaths) -> List[Dict[str, Any]]:
                 entry["target_uid"] = m.get("target_uid", "")
                 entry["label"] = m.get("label", "")
                 entry["files"] = m.get("files", [])
+                files_list = m.get("files", [])
+                if files_list:
+                    entry["size_bytes"] = sum(int(f.get("size_bytes", 0)) for f in files_list)
+                else:
+                    entry["size_bytes"] = sum(f.stat().st_size for f in disk_files)
             except Exception:
-                pass
+                entry["size_bytes"] = sum(f.stat().st_size for f in disk_files)
         elif meta_file.is_file():
             try:
                 m = json.loads(meta_file.read_text(encoding="utf-8"))
                 entry["created_at"] = m.get("created_at", "")
                 entry["target_uid"] = m.get("target_uid", "")
+                entry["label"] = m.get("label", "")
             except Exception:
                 pass
+            entry["size_bytes"] = sum(f.stat().st_size for f in disk_files)
+        else:
+            entry["size_bytes"] = sum(f.stat().st_size for f in disk_files)
         items.append(entry)
     items.sort(key=lambda x: x.get("created_at", "") or x.get("backup_id", ""), reverse=True)
     return items

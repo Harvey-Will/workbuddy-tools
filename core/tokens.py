@@ -78,8 +78,6 @@ def iter_token_events(paths: AppPaths) -> Iterable[TokenEvent]:
     if not paths.projects_dir.exists():
         return
     for jsonl in paths.projects_dir.rglob("*.jsonl"):
-        # skip subagents optional? include them for accuracy
-        session_id = jsonl.parent.name if jsonl.parent.name != "subagents" else jsonl.parent.parent.name
         if jsonl.parent.name == "subagents":
             session_id = jsonl.parent.parent.name
         else:
@@ -110,14 +108,19 @@ def iter_token_events(paths: AppPaths) -> Iterable[TokenEvent]:
                         or usage.get("cached_tokens")
                     )
                     total = _int(usage.get("total_tokens"))
+                    # In OpenAI/Tencent/WorkBuddy standard, input_tokens already includes cache_read tokens.
+                    # If a provider reports uncached prompt tokens only (inp < cache), normalize inp to total prompt.
+                    prompt = inp if inp >= cache else inp + cache
                     if total <= 0:
-                        total = inp + out
-                    if total <= 0 and inp <= 0 and out <= 0:
+                        total = prompt + out
+                    elif total < prompt + out:
+                        total = prompt + out
+                    if total <= 0 and prompt <= 0 and out <= 0:
                         continue
                     yield TokenEvent(
                         ts_ms=ts,
                         model=_extract_model(obj),
-                        input_tokens=inp,
+                        input_tokens=prompt,
                         output_tokens=out,
                         cache_read=cache,
                         total_tokens=total,
@@ -161,6 +164,13 @@ def _range_bounds(range_key: str, date_from: Optional[str], date_to: Optional[st
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
 
 
+def _calc_hit_rate(inp: int, cache: int) -> float:
+    if cache <= 0:
+        return 0.0
+    prompt = inp if inp >= cache else inp + cache
+    return round(min(1.0, cache / prompt), 4) if prompt > 0 else 0.0
+
+
 def summarize_tokens(
     edition: str,
     range_key: str = "7d",
@@ -198,21 +208,20 @@ def summarize_tokens(
         dacc["cache_read"] += ev.cache_read
         dacc["total"] += ev.total_tokens
 
-    cache_hit_rate = 0.0
-    # cache hit rate approx: cache_read / (input) when input > 0
-    if totals["input"] > 0:
-        cache_hit_rate = round(min(1.0, totals["cache_read"] / totals["input"]), 4)
-    elif totals["total"] > 0:
-        cache_hit_rate = 0.0
+    cache_hit_rate = _calc_hit_rate(totals["input"], totals["cache_read"])
 
     by_model = []
     for model, acc in sorted(by_model_acc.items(), key=lambda x: -x[1]["total"]):
+        m_hit = _calc_hit_rate(acc["input"], acc["cache_read"])
+        ratio = round(acc["total"] / totals["total"], 4) if totals["total"] > 0 else 0.0
         by_model.append(
             {
                 "model": model,
                 "color": color_for_model(model),
                 **acc,
-                "cache_hit_rate": round(min(1.0, acc["cache_read"] / acc["input"]), 4) if acc["input"] else 0.0,
+                "ratio": ratio,
+                "percent": round(ratio * 100, 1),
+                "cache_hit_rate": m_hit,
             }
         )
 
@@ -220,9 +229,28 @@ def summarize_tokens(
     for day in sorted(by_day_model.keys()):
         models = []
         for model, acc in sorted(by_day_model[day].items(), key=lambda x: -x[1]["total"]):
-            models.append({"model": model, "color": color_for_model(model), **acc})
+            models.append({
+                "model": model,
+                "color": color_for_model(model),
+                **acc,
+                "cache_hit_rate": _calc_hit_rate(acc["input"], acc["cache_read"]),
+            })
         day_total = sum(m["total"] for m in models)
-        by_day.append({"date": day, "total": day_total, "by_model": models})
+        day_input = sum(m["input"] for m in models)
+        day_output = sum(m["output"] for m in models)
+        day_cache = sum(m["cache_read"] for m in models)
+        day_hit = _calc_hit_rate(day_input, day_cache)
+        by_day.append({
+            "date": day,
+            "total": day_total,
+            "input": day_input,
+            "output": day_output,
+            "cache_read": day_cache,
+            "cache_hit_rate": day_hit,
+            "by_model": models,
+        })
+
+    daily_avg = round(totals["total"] / max(1, len(by_day))) if totals["total"] > 0 else 0
 
     return {
         "edition": paths.edition,
@@ -233,7 +261,12 @@ def summarize_tokens(
             "from_ms": start_ms,
             "to_ms": end_ms,
         },
-        "totals": {**totals, "cache_hit_rate": cache_hit_rate, "events": event_count},
+        "totals": {
+            **totals,
+            "cache_hit_rate": cache_hit_rate,
+            "events": event_count,
+            "daily_average": daily_avg,
+        },
         "by_model": by_model,
         "by_day": by_day,
     }
