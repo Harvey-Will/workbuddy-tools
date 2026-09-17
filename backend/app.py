@@ -7,6 +7,7 @@ import secrets
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -35,6 +36,8 @@ from core.editions import (
 )
 from core.safety import (
     AccountNotFound,
+    BackupCorrupted,
+    BackupNotFound,
     ClientRunningError,
     InvalidUID,
     MigrationBlocked,
@@ -44,7 +47,7 @@ from core.safety import (
     WriteConflict,
 )
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
 # Optional loopback auth token (set by desktop shell). Empty = open (dev/CLI).
@@ -97,6 +100,11 @@ class MigrateRunBody(BaseModel):
     target_uid: Optional[str] = None
     items: Dict[str, bool] = Field(default_factory=dict)
     mode: str = "copy"
+
+
+class RestoreBody(BaseModel):
+    edition: str
+    backup_id: str
 
 
 @app.middleware("http")
@@ -165,6 +173,10 @@ def _map_safety(e: SafetyError) -> HTTPException:
         status = 409
     elif isinstance(e, AccountNotFound):
         status = 404
+    elif isinstance(e, BackupNotFound):
+        status = 404
+    elif isinstance(e, BackupCorrupted):
+        status = 409
     elif isinstance(e, WriteConflict):
         status = 409
     elif isinstance(e, SchemaIncompatible):
@@ -252,6 +264,100 @@ def api_migrate_plan(
         raise _map_safety(e)
 
 
+_jobs: Dict[str, Dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+
+
+def _run_job_worker(job_id: str, payload: Dict[str, Any]) -> None:
+    def progress_cb(stage: str, percent: int, msg: str) -> None:
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id]["stage"] = stage
+                _jobs[job_id]["progress"] = percent
+                _jobs[job_id]["message"] = msg
+                _jobs[job_id]["updated_at"] = datetime.now().isoformat()
+
+    if not _migrate_lock.acquire(blocking=False):
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "failed"
+            _jobs[job_id]["error"] = {"code": "busy", "message": "已有迁移在进行中，请稍后再试"}
+            _jobs[job_id]["updated_at"] = datetime.now().isoformat()
+        return
+
+    try:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "running"
+        result = migrate_mod.run_migrate(payload, progress_callback=progress_cb)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "completed" if result.get("ok") else "failed"
+            _jobs[job_id]["progress"] = 100
+            _jobs[job_id]["result"] = result
+            _jobs[job_id]["updated_at"] = datetime.now().isoformat()
+    except SafetyError as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "failed"
+            _jobs[job_id]["error"] = {"code": e.code, "message": e.message}
+            _jobs[job_id]["updated_at"] = datetime.now().isoformat()
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "failed"
+            _jobs[job_id]["error"] = {"code": "migrate_failed", "message": str(e)}
+            _jobs[job_id]["updated_at"] = datetime.now().isoformat()
+    finally:
+        _migrate_lock.release()
+
+
+@app.post("/api/migrate/jobs")
+def api_migrate_create_job(body: MigrateRunBody) -> Dict[str, Any]:
+    fe, te = _norm(body.from_edition), _norm(body.to_edition)
+    if body.mode not in ("copy",):
+        raise HTTPException(status_code=400, detail={"code": "bad_mode", "message": "v0.1 仅支持 copy"})
+    payload = {
+        "from_edition": fe,
+        "to_edition": te,
+        "source_uid": body.source_uid,
+        "target_uid": body.target_uid,
+        "items": body.items,
+    }
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    rand_id = secrets.token_hex(4)
+    job_id = f"job_{stamp}_{rand_id}"
+    job_info = {
+        "job_id": job_id,
+        "status": "pending",
+        "stage": "queued",
+        "progress": 0,
+        "message": "已排队，等待启动...",
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+        "payload": {k: v for k, v in payload.items() if k != "items"},
+        "result": None,
+        "error": None,
+    }
+    with _jobs_lock:
+        _jobs[job_id] = job_info
+    thread = threading.Thread(target=_run_job_worker, args=(job_id, payload), daemon=True)
+    thread.start()
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/migrate/jobs/{job_id}")
+def api_migrate_get_job(job_id: str) -> Dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={"code": "job_not_found", "message": "作业不存在"})
+    return job
+
+
+@app.get("/api/migrate/jobs")
+def api_migrate_list_jobs() -> Dict[str, Any]:
+    with _jobs_lock:
+        items = list(_jobs.values())
+    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return {"jobs": items[:20]}
+
+
 @app.post("/api/migrate/run")
 def api_migrate_run(body: MigrateRunBody) -> Dict[str, Any]:
     fe, te = _norm(body.from_edition), _norm(body.to_edition)
@@ -277,6 +383,23 @@ def api_migrate_run(body: MigrateRunBody) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail={"code": "migrate_failed", "message": str(e)})
     finally:
         _migrate_lock.release()
+
+
+@app.get("/api/backups")
+def api_backups(edition: str = Query(...)) -> Dict[str, Any]:
+    ed = _norm(edition)
+    paths = make_paths(ed)
+    return {"edition": ed, "backups": migrate_mod.list_backups(paths)}
+
+
+@app.post("/api/backups/restore")
+def api_backups_restore(body: RestoreBody) -> Dict[str, Any]:
+    ed = _norm(body.edition)
+    paths = make_paths(ed)
+    try:
+        return migrate_mod.restore_backup(paths, body.backup_id)
+    except SafetyError as e:
+        raise _map_safety(e)
 
 
 @app.get("/api/tokens/summary")
