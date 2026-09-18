@@ -414,12 +414,6 @@ def preflight_migration(
     if fe == te and source_uid == target_uid:
         raise MigrationBlocked("源账号和目标账号相同，无需执行迁移。")
 
-    if fe == te and (selected_items & SESSION_SCOPED_ITEMS):
-        raise MigrationBlocked(
-            "当前版本暂不支持同版本账号之间复制会话相关数据。"
-            "这样做需要完整 Session ID 重映射，否则可能修改或混淆源账号数据。"
-        )
-
     if client_looks_running(fe):
         raise ClientRunningError("源客户端正在运行，请完全退出 WorkBuddy 后再迁移。")
     if client_looks_running(te):
@@ -482,18 +476,18 @@ def session_ids_for_uid(paths: AppPaths, uid: str, *, strict: bool = False) -> L
     return validated
 
 
-def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target_uid: str) -> Tuple[int, str, str]:
+def migrate_sessions(
+    source: AppPaths,
+    target: AppPaths,
+    source_uid: str,
+    target_uid: str,
+    session_id_map: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str, str]:
     """Returns (count, detail, status)."""
     same_db = source.db_path.resolve() == target.db_path.resolve()
     if not source.db_path.exists():
         return 0, "源数据库不存在", MigrateStatus.SKIPPED
-    if same_db:
-        # v0.1.1: never reassign session ownership inside one DB.
-        return (
-            0,
-            "同版本库内不支持会话迁移（会修改源账号归属），已跳过",
-            MigrateStatus.SKIPPED,
-        )
+
     conn = sqlite3.connect(str(source.db_path))
     try:
         cur = conn.cursor()
@@ -525,11 +519,20 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
         migrated = 0
         skipped = 0
         for row in rows:
+            old_sid = row[idx["id"]]
+            new_sid = (
+                session_id_map.get(old_sid)
+                if session_id_map
+                else (str(uuid.uuid4()) if same_db else old_sid)
+            )
             vals = []
             for c in insert_cols:
-                v = row[idx[c]]
-                if c == "user_id":
+                if c == "id":
+                    v = new_sid
+                elif c == "user_id":
                     v = target_uid
+                else:
+                    v = row[idx[c]]
                 vals.append(v)
             tcur.execute(f"INSERT OR IGNORE INTO sessions ({col_sql}) VALUES ({ph})", vals)
             if tcur.rowcount > 0:
@@ -542,7 +545,8 @@ def migrate_sessions(source: AppPaths, target: AppPaths, source_uid: str, target
         raise SchemaIncompatible(f"写入目标 sessions 失败，已中止: {e}") from e
     finally:
         tconn.close()
-    return migrated, f"跨库复制 {migrated}，跳过 {skipped}", MigrateStatus.SUCCESS
+    label = "同库克隆" if same_db else "跨库复制"
+    return migrated, f"{label} {migrated}，跳过 {skipped}", MigrateStatus.SUCCESS
 
 
 SHA256_HEX_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
@@ -600,21 +604,75 @@ def find_reachable_blobs(source: AppPaths, session_ids: List[str]) -> List[Path]
     return matched
 
 
-def migrate_session_content(session_ids: List[str], source: AppPaths, target: AppPaths) -> int:
+def migrate_session_content(
+    session_ids: List[str],
+    source: AppPaths,
+    target: AppPaths,
+    session_id_map: Optional[Dict[str, str]] = None,
+) -> int:
     if not session_ids:
         return 0
-    sid_set = set(session_ids)
+    id_map = session_id_map or {sid: sid for sid in session_ids}
     copied = 0
     if source.projects_dir.exists():
+        target.projects_dir.mkdir(parents=True, exist_ok=True)
         for proj in source.projects_dir.iterdir():
             if not proj.is_dir():
                 continue
+            target_proj = target.projects_dir / proj.name
+            target_proj.mkdir(parents=True, exist_ok=True)
             for item in proj.iterdir():
                 name = item.name
                 base = name.split(".")[0]
-                if base in sid_set or (item.is_dir() and name in sid_set):
-                    if _copy_if_missing(item, target.projects_dir / proj.name / item.name):
+                if base in id_map:
+                    old_sid = base
+                    new_sid = id_map[old_sid]
+                    suffix = name[len(base):]
+                    dst_item = target_proj / f"{new_sid}{suffix}"
+                    if dst_item.exists():
+                        continue
+                    if item.is_file():
+                        if name.endswith(".jsonl"):
+                            try:
+                                lines = item.read_text(encoding="utf-8", errors="ignore").splitlines()
+                                rewritten = []
+                                for line in lines:
+                                    if not line.strip():
+                                        continue
+                                    try:
+                                        obj = json.loads(line)
+                                        if isinstance(obj, dict):
+                                            if "sessionId" in obj:
+                                                obj["sessionId"] = new_sid
+                                            rewritten.append(json.dumps(obj, ensure_ascii=False))
+                                        else:
+                                            rewritten.append(line.replace(old_sid, new_sid))
+                                    except Exception:
+                                        rewritten.append(line.replace(old_sid, new_sid))
+                                atomic_write_text(dst_item, "\n".join(rewritten) + "\n")
+                                copied += 1
+                            except Exception:
+                                if _copy_if_missing(item, dst_item):
+                                    copied += 1
+                        else:
+                            try:
+                                content = item.read_text(encoding="utf-8", errors="ignore")
+                                atomic_write_text(dst_item, content.replace(old_sid, new_sid))
+                                copied += 1
+                            except Exception:
+                                if _copy_if_missing(item, dst_item):
+                                    copied += 1
+                    elif item.is_dir():
+                        shutil.copytree(str(item), str(dst_item))
                         copied += 1
+                elif item.is_dir() and item.name in id_map:
+                    old_sid = item.name
+                    new_sid = id_map[old_sid]
+                    dst_dir = target_proj / new_sid
+                    if not dst_dir.exists():
+                        shutil.copytree(str(item), str(dst_dir))
+                        copied += 1
+
     for src_root, dst_root in [
         (source.file_history_dir, target.file_history_dir),
         (source.changes_detail_dir, target.changes_detail_dir),
@@ -622,21 +680,39 @@ def migrate_session_content(session_ids: List[str], source: AppPaths, target: Ap
     ]:
         if not src_root.exists():
             continue
-        for sid in session_ids:
-            if _copy_if_missing(src_root / sid, dst_root / sid):
-                copied += 1
+        dst_root.mkdir(parents=True, exist_ok=True)
+        for old_sid, new_sid in id_map.items():
+            src_item = src_root / old_sid
+            dst_item = dst_root / new_sid
+            if src_item.exists() and not dst_item.exists():
+                if src_item.is_dir():
+                    shutil.copytree(str(src_item), str(dst_item))
+                    copied += 1
+                else:
+                    shutil.copy2(str(src_item), str(dst_item))
+                    copied += 1
+
     for src_root, dst_root, suffix in [
         (source.changes_index_dir, target.changes_index_dir, ".json"),
         (source.artifact_index_dir, target.artifact_index_dir, ".json"),
     ]:
         if not src_root.exists():
             continue
-        for sid in session_ids:
-            if _copy_if_missing(src_root / f"{sid}{suffix}", dst_root / f"{sid}{suffix}"):
-                copied += 1
+        dst_root.mkdir(parents=True, exist_ok=True)
+        for old_sid, new_sid in id_map.items():
+            src_file = src_root / f"{old_sid}{suffix}"
+            dst_file = dst_root / f"{new_sid}{suffix}"
+            if src_file.exists() and not dst_file.exists():
+                try:
+                    text = src_file.read_text(encoding="utf-8", errors="ignore")
+                    atomic_write_text(dst_file, text.replace(old_sid, new_sid))
+                    copied += 1
+                except Exception:
+                    if _copy_if_missing(src_file, dst_file):
+                        copied += 1
 
-    # Selective blob reachability: only copy blobs referenced by migrated sessions
-    if source.blobs_dir.exists():
+    # Selective blob reachability: only copy blobs referenced by migrated sessions if directories differ
+    if source.blobs_dir.exists() and (source.blobs_dir.resolve() != target.blobs_dir.resolve()):
         target.blobs_dir.mkdir(parents=True, exist_ok=True)
         reachable = find_reachable_blobs(source, session_ids)
         for blob_file in reachable:
@@ -783,21 +859,31 @@ def migrate_connectors(source: AppPaths, target: AppPaths, source_uid: str, targ
     return added, f"目标 mcpServers={servers}"
 
 
-def migrate_tasks(source: AppPaths, target: AppPaths, session_ids: List[str]) -> int:
+def migrate_tasks(
+    source: AppPaths,
+    target: AppPaths,
+    session_ids: List[str],
+    session_id_map: Optional[Dict[str, str]] = None,
+) -> int:
     """Copy only task dirs that belong to the selected source sessions.
 
     Empty session_ids means no source sessions — never fall back to all tasks.
     """
     if not source.tasks_dir.exists() or not session_ids:
         return 0
+    id_map = session_id_map or {sid: sid for sid in session_ids}
     ensure_within(target.root, target.tasks_dir)
     target.tasks_dir.mkdir(parents=True, exist_ok=True)
     copied = 0
-    for sid in session_ids:
-        safe_sid = validate_path_component(sid, label="session_id")
-        ensure_within(source.tasks_dir, source.tasks_dir / safe_sid)
-        ensure_within(target.tasks_dir, target.tasks_dir / safe_sid)
-        if _copy_if_missing(source.tasks_dir / safe_sid, target.tasks_dir / safe_sid):
+    for old_sid, new_sid in id_map.items():
+        safe_old = validate_path_component(old_sid, label="session_id")
+        safe_new = validate_path_component(new_sid, label="session_id")
+        src_dir = source.tasks_dir / safe_old
+        dst_dir = target.tasks_dir / safe_new
+        if src_dir.exists() and not dst_dir.exists():
+            ensure_within(source.tasks_dir, src_dir)
+            ensure_within(target.tasks_dir, dst_dir)
+            shutil.copytree(str(src_dir), str(dst_dir))
             copied += 1
     return copied
 
@@ -882,9 +968,15 @@ def migrate_shared_plugins(
     return n
 
 
-def migrate_session_usage(source: AppPaths, target: AppPaths, session_ids: List[str]) -> int:
+def migrate_session_usage(
+    source: AppPaths,
+    target: AppPaths,
+    session_ids: List[str],
+    session_id_map: Optional[Dict[str, str]] = None,
+) -> int:
     if not source.db_path.exists() or not target.db_path.exists() or not session_ids:
         return 0
+    id_map = session_id_map or {sid: sid for sid in session_ids}
     sconn = sqlite3.connect(str(source.db_path))
     try:
         scur = sconn.cursor()
@@ -913,7 +1005,14 @@ def migrate_session_usage(source: AppPaths, target: AppPaths, session_ids: List[
         idx = {c: cols.index(c) for c in insert_cols}
         copied = 0
         for row in rows:
-            vals = [row[idx[c]] for c in insert_cols]
+            old_sid = row[idx["session_id"]]
+            new_sid = id_map.get(old_sid, old_sid)
+            vals = []
+            for c in insert_cols:
+                if c == "session_id":
+                    vals.append(new_sid)
+                else:
+                    vals.append(row[idx[c]])
             tcur.execute(f"INSERT OR IGNORE INTO session_usage ({col_sql}) VALUES ({ph})", vals)
             copied += tcur.rowcount
         tconn.commit()
@@ -968,17 +1067,14 @@ def plan_migrate(
 
     same_edition = source.edition == target.edition
     same_account = same_edition and bool(target_uid) and source_uid == target_uid
-    blocked_keys = sorted(SESSION_SCOPED_ITEMS) if same_edition and not same_account else []
+    blocked_keys: List[str] = []
     warnings: List[str] = []
     blocked = False
     block_reason = ""
 
     default_items = dict(DEFAULT_MIGRATE_ITEMS)
-    if same_edition:
-        for k in blocked_keys:
-            default_items[k] = False
-        if blocked_keys:
-            warnings.append("同版本账号间暂不支持会话相关迁移，默认已关闭对应选项")
+    if same_edition and not same_account:
+        warnings.append("同版本账号迁移已启用会话 ID 独立重映射，源账号历史保持完好")
 
     # Preflight only the preview defaults (what UI would run), not every known key.
     preview_selected = {k for k, v in default_items.items() if v is True}
@@ -1071,8 +1167,14 @@ def run_migrate(
 
     # Strict session IDs before any backup/write.
     session_ids: List[str] = []
+    session_id_map: Dict[str, str] = {}
+    same_edition = source.edition == target.edition
     if selected & SESSION_SCOPED_ITEMS:
         session_ids = session_ids_for_uid(source, source_uid, strict=True)
+        if same_edition:
+            session_id_map = {sid: str(uuid.uuid4()) for sid in session_ids}
+        else:
+            session_id_map = {sid: sid for sid in session_ids}
 
     notify("backup", 20, "正在创建 SQLite 一致性快照与 Manifest 备份...")
     warnings: List[str] = []
@@ -1089,7 +1191,9 @@ def run_migrate(
     if "sessions" in selected:
         notify("sessions", 35, "正在迁移会话数据...")
         try:
-            n, detail, status = migrate_sessions(source, target, source_uid, target_uid)
+            n, detail, status = migrate_sessions(
+                source, target, source_uid, target_uid, session_id_map=session_id_map
+            )
             add_result("sessions", status, detail, n)
         except Exception as e:
             add_result("sessions", MigrateStatus.FAILED, str(e), 0)
@@ -1097,7 +1201,9 @@ def run_migrate(
     if "session_content" in selected:
         notify("session_content", 50, "正在迁移会话正文与引用附件...")
         try:
-            n = migrate_session_content(session_ids, source, target)
+            n = migrate_session_content(
+                session_ids, source, target, session_id_map=session_id_map
+            )
             add_result(
                 "session_content",
                 _status_for_count(n),
@@ -1126,7 +1232,9 @@ def run_migrate(
     if "tasks" in selected:
         notify("tasks", 82, "正在迁移任务上下文...")
         try:
-            n = migrate_tasks(source, target, session_ids)
+            n = migrate_tasks(
+                source, target, session_ids, session_id_map=session_id_map
+            )
             add_result(
                 "tasks",
                 _status_for_count(n),
@@ -1155,7 +1263,9 @@ def run_migrate(
     if "session_usage" in selected:
         notify("session_usage", 96, "正在迁移 Token 用量记录...")
         try:
-            n = migrate_session_usage(source, target, session_ids)
+            n = migrate_session_usage(
+                source, target, session_ids, session_id_map=session_id_map
+            )
             add_result(
                 "session_usage",
                 _status_for_count(n),

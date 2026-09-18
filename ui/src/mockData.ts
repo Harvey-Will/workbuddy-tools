@@ -584,11 +584,11 @@ class MockStore {
     error: null;
   } {
     return {
-      current_version: "0.1.3",
-      latest_version: "0.1.3",
+      current_version: "0.1.4",
+      latest_version: "0.1.4",
       has_update: false,
-      release_name: "v0.1.3 正式版",
-      release_notes: "🎉 当前为最新正式版。\n- 优化双端账号与工作空间管理\n- 新增精美 Token 统计与多尺度缩放\n- 新增版本号展示与 GitHub 开源快捷入口\n- 强化在线原子快照与迁移流水线",
+      release_name: "v0.1.4 正式版",
+      release_notes: "🎉 当前为最新正式版。\n- 支持同版本账号间全量数据无损迁移\n- 账号中心卡片专属即时快照与一键还原\n- 优化双端账号与工作空间管理\n- 强化在线原子快照与迁移流水线",
       published_at: new Date().toISOString(),
       html_url: "https://github.com/Harvey-Will/workbuddy-tools/releases",
       download_url: "https://github.com/Harvey-Will/workbuddy-tools/releases/latest",

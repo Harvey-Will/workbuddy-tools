@@ -94,9 +94,10 @@ class TestUpdateModule(unittest.TestCase):
         self.assertEqual(res["latest_version"], "0.1.3")
 
     def test_backend_system_endpoints(self):
-        from backend.app import api_system_version, api_open_url, OpenUrlBody, HTTPException
+        from backend.app import api_system_version, api_open_url, OpenUrlBody, HTTPException, __version__
         v = api_system_version()
-        self.assertEqual(v["version"], "0.1.3")
+        self.assertEqual(v["version"], __version__)
+        self.assertEqual(v["version"], "0.1.4")
         self.assertIn("github.com", v["repo_url"])
 
         with patch("webbrowser.open") as mock_open:

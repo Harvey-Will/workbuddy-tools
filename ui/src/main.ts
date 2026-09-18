@@ -14,7 +14,7 @@ import {
   ApiError,
 } from "./api";
 
-const APP_VERSION = "0.1.3";
+const APP_VERSION = "0.1.4";
 const GITHUB_REPO_URL = "https://github.com/Harvey-Will/workbuddy-tools";
 const GITHUB_ICON_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
@@ -74,6 +74,7 @@ const state = {
   backupsEdition: "domestic",
   backups: [] as BackupItem[],
   pendingRestoreBackup: null as BackupItem | null,
+  currentBackupAccount: null as { uid: string; name: string } | null,
   isCheckingUpdate: false,
   latestUpdate: null as UpdateCheckResult | null,
 };
@@ -170,6 +171,9 @@ function fmtElapsed(ms: number): string {
 }
 
 function backupLabelBadge(label?: string): { text: string; colorClass: string } {
+  if (label === "account_manual") {
+    return { text: "账号快照", colorClass: "ok" };
+  }
   if (!label || label === "manual" || label === "manual_snapshot") {
     return { text: "手动即时快照", colorClass: "ok" };
   }
@@ -548,6 +552,45 @@ function renderShell(): void {
         <button id="btn-update-download" class="btn primary">前往 GitHub 下载升级 ↗</button>
       </div>
     </div>
+  </div>
+
+  <!-- Account Backup & Snapshot Modal -->
+  <div id="account-backup-modal" class="modal-backdrop hidden">
+    <div class="modal-dialog account-backup-dialog">
+      <div class="modal-header">
+        <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+          <span style="font-size:20px">💾</span>
+          <div style="min-width:0">
+            <h3 id="account-backup-title">账号备份与快照</h3>
+            <div id="account-backup-sub" class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+          </div>
+        </div>
+        <button id="btn-account-backup-close" class="modal-close-btn" title="关闭窗口">&times;</button>
+      </div>
+      <div class="modal-body" style="gap:0.9rem">
+        <div class="account-backup-banner">
+          <div>
+            <div style="font-weight:600;color:var(--ink)">在线一致性原子快照</div>
+            <div class="muted small">为当前账号生成包含完整 SQLite 数据库、记忆文件与 MCP 配置的时间戳备份。</div>
+          </div>
+          <button id="btn-account-create-backup" class="btn primary">+ 创建即时快照</button>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="font-weight:650;color:var(--ink);font-size:13px">历史快照列表</div>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);cursor:pointer">
+            <input type="checkbox" id="check-account-backup-filter" checked />
+            <span>仅显示本账号快照</span>
+          </label>
+        </div>
+
+        <div id="account-backup-list" class="account-backup-list"></div>
+      </div>
+      <div class="modal-footer" style="justify-content:space-between;align-items:center">
+        <span class="muted small">💡 点击「还原」将把环境恢复至对应快照状态（执行前请退出客户端）。</span>
+        <button id="btn-account-backup-done" class="btn">关闭</button>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -629,6 +672,11 @@ function applyConcurrencyLock(): void {
     if (disabled) btn.title = "迁移正在进行中，已暂时锁定";
     else btn.removeAttribute("title");
   });
+  document.querySelectorAll<HTMLButtonElement>("[data-backup]").forEach((btn) => {
+    btn.disabled = disabled;
+    if (disabled) btn.title = "迁移正在进行中，已暂时锁定";
+    else btn.removeAttribute("title");
+  });
   const addBtn = document.getElementById("btn-add") as HTMLButtonElement | null;
   if (addBtn) addBtn.disabled = disabled;
   const openBtn = document.getElementById("btn-open") as HTMLButtonElement | null;
@@ -643,6 +691,12 @@ function applyConcurrencyLock(): void {
   const createBkBtn = document.getElementById("btn-create-backup") as HTMLButtonElement | null;
   if (createBkBtn) createBkBtn.disabled = disabled;
   document.querySelectorAll<HTMLButtonElement>("[data-restore]").forEach((btn) => {
+    if (disabled) {
+      btn.disabled = true;
+      btn.title = "迁移正在进行中，已暂时锁定";
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-acct-restore]").forEach((btn) => {
     if (disabled) {
       btn.disabled = true;
       btn.title = "迁移正在进行中，已暂时锁定";
@@ -695,6 +749,7 @@ function renderAccounts(): void {
           ${current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}">切换</button>`}
           <button class="btn" data-rename="${escapeHtml(a.uid)}" data-name="${name}">重命名</button>
           <button class="btn ghost" data-src="${escapeHtml(a.uid)}">迁移源</button>
+          <button class="btn" data-backup="${escapeHtml(a.uid)}" data-name="${name}" title="管理此账号的快照备份与还原">💾 备份</button>
         </div>
       </div>`;
     })
@@ -733,6 +788,13 @@ function renderAccounts(): void {
       void fillMigrateSelects().then(() => {
         ($("#mig-source") as HTMLSelectElement).value = btn.dataset.src!;
       });
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-backup]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const uid = btn.dataset.backup!;
+      const name = btn.dataset.name || uid;
+      void openAccountBackupModal(uid, name);
     });
   });
   applyConcurrencyLock();
@@ -859,9 +921,6 @@ async function loadPlan(): Promise<void> {
     const messages: string[] = [];
     if (plan.blocked && plan.block_reason) messages.push(plan.block_reason);
     if (plan.client_running) messages.push("客户端正在运行，请先完全退出 WorkBuddy / WorkBuddyAI 后再执行迁移。");
-    if (plan.same_edition && !plan.same_account) {
-      messages.push("同版本账号间暂不支持会话相关数据迁移（会话/正文/任务/用量），仅可迁移记忆、MCP、技能等。");
-    }
     for (const w of plan.warnings || []) messages.push(w);
     if (messages.length) {
       warn.textContent = messages.join(" ");
@@ -1270,6 +1329,105 @@ function openRestoreModal(bk: BackupItem): void {
   `;
 
   modal.classList.remove("hidden");
+}
+
+async function openAccountBackupModal(uid: string, name: string): Promise<void> {
+  state.currentBackupAccount = { uid, name };
+  const modal = $("#account-backup-modal");
+  const titleEl = $("#account-backup-title");
+  const subEl = $("#account-backup-sub");
+
+  titleEl.textContent = `账号备份与快照 · ${name}`;
+  const edInfo = state.editions.find((e) => e.key === state.edition);
+  subEl.textContent = `UID: ${uid} · 所属版本: ${edInfo?.short || state.edition}`;
+
+  modal.classList.remove("hidden");
+  renderAccountBackupListLoading();
+  try {
+    const res = await api.backups(state.edition);
+    state.backups = res.backups || [];
+    renderAccountBackupList();
+  } catch (e) {
+    const listEl = $("#account-backup-list");
+    if (listEl) {
+      listEl.innerHTML = `<div class="empty" style="padding:1.5rem">获取快照列表失败: ${escapeHtml((e as Error).message)}</div>`;
+    }
+  }
+}
+
+function renderAccountBackupListLoading(): void {
+  const listEl = $("#account-backup-list");
+  if (listEl) {
+    listEl.innerHTML = `<div class="empty" style="padding:1.5rem">正在加载快照历史...</div>`;
+  }
+}
+
+function renderAccountBackupList(): void {
+  const listEl = $("#account-backup-list");
+  if (!listEl) return;
+  const acct = state.currentBackupAccount;
+  const filterCheck = document.getElementById("check-account-backup-filter") as HTMLInputElement | null;
+  const onlyThisAccount = filterCheck ? filterCheck.checked : true;
+
+  const curEd = state.editions.find((e) => e.key === state.edition);
+  const clientRunning = curEd?.client_running ?? false;
+
+  let list = state.backups || [];
+  if (onlyThisAccount && acct) {
+    const uidPrefix = acct.uid.slice(0, 8);
+    list = list.filter((b) => b.target_uid === acct.uid || b.backup_id.includes(uidPrefix));
+  }
+
+  if (!list.length) {
+    listEl.innerHTML = `
+      <div class="empty" style="padding:1.5rem">
+        ${onlyThisAccount ? "此账号暂无快照记录。点击上方「+ 创建即时快照」立即备份。" : "当前版本暂无快照记录。"}
+      </div>
+    `;
+    return;
+  }
+
+  const itemsHtml = list
+    .map((bk) => {
+      const labelInfo = backupLabelBadge(bk.label);
+      const relTime = fmtRelativeTime(bk.created_at);
+      const absTime = bk.created_at ? new Date(bk.created_at).toLocaleString() : bk.backup_id;
+      const sizeStr = fmtBytes(bk.size_bytes || 0);
+      const isThisAcct = acct && (bk.target_uid === acct.uid || bk.backup_id.includes(acct.uid.slice(0, 8)));
+      const disabledAttr = clientRunning || state.isMigrating ? 'disabled title="客户端正在运行或迁移进行中，暂无法还原"' : "";
+
+      return `
+      <div class="account-backup-item">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;flex-wrap:wrap">
+            <span style="font-weight:600;color:var(--ink);font-size:12px;font-family:monospace">${escapeHtml(bk.backup_id)}</span>
+            <span class="badge ${labelInfo.colorClass}">${escapeHtml(labelInfo.text)}</span>
+            ${isThisAcct ? '<span class="badge ok">此账号</span>' : ""}
+          </div>
+          <div class="muted small">
+            ${escapeHtml(absTime)} (${escapeHtml(relTime)}) · ${bk.file_count} 个文件 · ${sizeStr}
+          </div>
+        </div>
+        <div>
+          <button class="btn small" data-acct-restore="${escapeHtml(bk.backup_id)}" ${disabledAttr}>↩️ 还原</button>
+        </div>
+      </div>
+    `;
+    })
+    .join("");
+
+  listEl.innerHTML = itemsHtml;
+
+  listEl.querySelectorAll<HTMLButtonElement>("[data-acct-restore]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const bkId = btn.dataset.acctRestore!;
+      const bk = state.backups.find((b) => b.backup_id === bkId);
+      if (!bk) return;
+      const modal = $("#account-backup-modal");
+      modal.classList.add("hidden");
+      openRestoreModal(bk);
+    });
+  });
 }
 
 function renderKpis(data: TokenSummary): void {
@@ -2124,6 +2282,59 @@ function bind(): void {
         doRestoreBtn.textContent = "确认执行还原";
         doRestoreBtn.disabled = false;
       }
+    });
+  }
+
+  // Account Backup Modal Event Listeners
+  const acctCreateBkBtn = document.getElementById("btn-account-create-backup") as HTMLButtonElement | null;
+  if (acctCreateBkBtn) {
+    acctCreateBkBtn.addEventListener("click", async () => {
+      const acct = state.currentBackupAccount;
+      if (!acct) return;
+      acctCreateBkBtn.disabled = true;
+      acctCreateBkBtn.textContent = "创建中…";
+      try {
+        const res = await api.createBackup(state.edition, acct.uid, "account_manual");
+        toast(`快照创建成功: ${res.backup_id}`);
+        const bkRes = await api.backups(state.edition);
+        state.backups = bkRes.backups || [];
+        renderAccountBackupList();
+        renderBackups();
+      } catch (e) {
+        const err = e as ApiError;
+        if (err.code === "busy") {
+          toast("已有任务正在进行中，请稍后再试");
+        } else if (err.code === "client_running" || err.status === 409) {
+          toast("客户端正在运行，请先完全退出客户端再创建快照");
+        } else {
+          toast("创建快照失败: " + (e as Error).message);
+        }
+      } finally {
+        acctCreateBkBtn.textContent = "+ 创建即时快照";
+        acctCreateBkBtn.disabled = false;
+      }
+    });
+  }
+
+  const filterCheck = document.getElementById("check-account-backup-filter") as HTMLInputElement | null;
+  if (filterCheck) {
+    filterCheck.addEventListener("change", () => {
+      renderAccountBackupList();
+    });
+  }
+
+  const closeAcctBkBtn = document.getElementById("btn-account-backup-close");
+  const doneAcctBkBtn = document.getElementById("btn-account-backup-done");
+  const acctBkModal = document.getElementById("account-backup-modal");
+  const closeAcctModal = () => {
+    if (acctBkModal) acctBkModal.classList.add("hidden");
+    state.currentBackupAccount = null;
+  };
+  if (closeAcctBkBtn) closeAcctBkBtn.addEventListener("click", closeAcctModal);
+  if (doneAcctBkBtn) doneAcctBkBtn.addEventListener("click", closeAcctModal);
+  if (acctBkModal) {
+    acctBkModal.addEventListener("click", (e) => {
+      if (e.target === acctBkModal) closeAcctModal();
     });
   }
 }
