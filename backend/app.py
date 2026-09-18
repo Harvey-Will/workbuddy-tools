@@ -48,7 +48,8 @@ from core.safety import (
     WriteConflict,
 )
 
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
+__version__ = APP_VERSION
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
 # Optional loopback auth token (set by desktop shell). Empty = open (dev/CLI).

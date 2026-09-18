@@ -1891,3 +1891,49 @@ button {
   opacity: 0.84;
   filter: brightness(1.08);
 }
+
+/* —— Account Backup & Snapshot Modal —— */
+.account-backup-dialog {
+  max-width: 620px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.account-backup-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  padding: 0.85rem 1rem;
+  gap: 1rem;
+}
+
+.account-backup-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xs);
+  background: var(--panel);
+}
+
+.account-backup-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0.95rem;
+  border-bottom: 1px solid var(--line);
+  transition: background 0.12s ease;
+  gap: 0.8rem;
+}
+
+.account-backup-item:last-child {
+  border-bottom: none;
+}
+
+.account-backup-item:hover {
+  background: var(--bg-subtle);
+}
+

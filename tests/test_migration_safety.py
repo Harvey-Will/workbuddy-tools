@@ -170,62 +170,6 @@ class TestValidateUid(SafetyCase):
 
 
 class TestMigrationBlocks(SafetyCase):
-    def test_same_edition_sessions_blocked_no_write(self):
-        self.same_edition()
-        from core import migrate as migrate_mod
-        from core.safety import MigrationBlocked
-
-        self._no_client(migrate_mod)
-        before = snapshot_tree(self.home / ".workbuddy")
-        with self.assertRaises(MigrationBlocked):
-            migrate_mod.run_migrate(
-                {
-                    "from_edition": "domestic",
-                    "to_edition": "domestic",
-                    "source_uid": UID_A,
-                    "target_uid": UID_B,
-                    "items": {"sessions": True},
-                }
-            )
-        self.assertEqual(snapshot_tree(self.home / ".workbuddy"), before)
-
-    def test_same_edition_session_content_blocked(self):
-        self.same_edition()
-        from core import migrate as migrate_mod
-        from core.safety import MigrationBlocked
-
-        self._no_client(migrate_mod)
-        before = snapshot_tree(self.home / ".workbuddy")
-        with self.assertRaises(MigrationBlocked):
-            migrate_mod.run_migrate(
-                {
-                    "from_edition": "domestic",
-                    "to_edition": "domestic",
-                    "source_uid": UID_A,
-                    "target_uid": UID_B,
-                    "items": {"session_content": True},
-                }
-            )
-        self.assertEqual(snapshot_tree(self.home / ".workbuddy"), before)
-
-    def test_same_edition_tasks_blocked(self):
-        self.same_edition()
-        from core import migrate as migrate_mod
-        from core.safety import MigrationBlocked
-
-        self._no_client(migrate_mod)
-        before = snapshot_tree(self.home / ".workbuddy")
-        with self.assertRaises(MigrationBlocked):
-            migrate_mod.run_migrate(
-                {
-                    "from_edition": "domestic",
-                    "to_edition": "domestic",
-                    "source_uid": UID_A,
-                    "target_uid": UID_B,
-                    "items": {"tasks": True},
-                }
-            )
-        self.assertEqual(snapshot_tree(self.home / ".workbuddy"), before)
 
     def test_same_account_blocked(self):
         self.same_edition()
@@ -652,17 +596,17 @@ class TestMigrationBlocks(SafetyCase):
         self.assertEqual(snapshot_tree(self.home), before)
         self.assertFalse(outside.exists())
 
-    def test_same_edition_plan_allows_safe_defaults(self):
+    def test_same_edition_plan_allows_all_defaults(self):
         self.same_edition()
         from core import migrate as migrate_mod
 
         self._no_client(migrate_mod)
         plan = migrate_mod.plan_migrate("domestic", "domestic", UID_A, UID_B)
         self.assertFalse(plan["blocked"], plan.get("block_reason"))
-        self.assertFalse(plan["default_items"]["sessions"])
-        self.assertFalse(plan["default_items"]["tasks"])
+        self.assertTrue(plan["default_items"]["sessions"])
+        self.assertTrue(plan["default_items"]["tasks"])
         self.assertTrue(plan["default_items"]["user_memory"])
-        self.assertIn("sessions", plan["blocked_item_keys"])
+        self.assertEqual(plan["blocked_item_keys"], [])
 
     def test_same_edition_memory_migration_allowed(self):
         self.same_edition()
@@ -734,6 +678,125 @@ class TestAtomicWrite(unittest.TestCase):
             atomic_write_text(p, '{"ok":true}')
             self.assertEqual(p.read_text(encoding="utf-8"), '{"ok":true}')
             self.assertEqual(list(Path(td).glob("*.tmp")), [])
+
+
+class TestSameEditionMigration(SafetyCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.same_edition()
+        from core import migrate as migrate_mod
+        self._no_client(migrate_mod)
+
+    def test_same_edition_full_migration(self):
+        from core import migrate as migrate_mod
+        root = self.home / ".workbuddy"
+
+        # Prepare session content in projects
+        proj_dir = root / "projects" / "my-project"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        s1_jsonl = proj_dir / "sess-a1.jsonl"
+        s1_jsonl.write_text(
+            json.dumps({"id": "m1", "sessionId": "sess-a1", "content": "hello world"}) + "\n",
+            encoding="utf-8",
+        )
+
+        # Prepare workspace session & artifact index
+        ws_sess = root / "workspace" / "sessions" / "sess-a1"
+        ws_sess.mkdir(parents=True, exist_ok=True)
+        (ws_sess / "state.txt").write_text("workspace state", encoding="utf-8")
+
+        art_idx = root / "artifact-index" / "sess-a1.json"
+        art_idx.parent.mkdir(parents=True, exist_ok=True)
+        art_idx.write_text(
+            json.dumps({"version": 1, "session": "sess-a1", "files": ["doc.txt"]}),
+            encoding="utf-8",
+        )
+
+        # Run full migration from UID_A to UID_B
+        result = migrate_mod.run_migrate(
+            {
+                "from_edition": "domestic",
+                "to_edition": "domestic",
+                "source_uid": UID_A,
+                "target_uid": UID_B,
+                "items": {
+                    "sessions": True,
+                    "session_content": True,
+                    "tasks": True,
+                    "session_usage": True,
+                    "user_memory": True,
+                    "mcp_connectors": True,
+                },
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+
+        conn = sqlite3.connect(str(root / "workbuddy.db"))
+        cur = conn.cursor()
+
+        # 1. Source session remains intact
+        cur.execute("SELECT id, user_id, title FROM sessions WHERE user_id = ?", (UID_A,))
+        src_sessions = cur.fetchall()
+        self.assertEqual(len(src_sessions), 1)
+        self.assertEqual(src_sessions[0][0], "sess-a1")
+
+        # 2. Target receives newly cloned session with unique ID
+        cur.execute("SELECT id, user_id, title FROM sessions WHERE user_id = ?", (UID_B,))
+        target_sessions = cur.fetchall()
+        self.assertEqual(len(target_sessions), 2)
+        target_sids = [r[0] for r in target_sessions]
+        self.assertIn("sess-b2", target_sids)
+        cloned_sid = [sid for sid in target_sids if sid != "sess-b2"][0]
+        self.assertNotEqual(cloned_sid, "sess-a1")
+
+        # 3. Session usage cloned with new session_id
+        cur.execute("SELECT session_id, model, input_tokens FROM session_usage WHERE session_id = ?", (cloned_sid,))
+        usages = cur.fetchall()
+        self.assertEqual(len(usages), 1)
+        self.assertEqual(usages[0][0], cloned_sid)
+
+        conn.close()
+
+        # 4. Session content cloned and rewritten with new session_id
+        cloned_jsonl = proj_dir / f"{cloned_sid}.jsonl"
+        self.assertTrue(cloned_jsonl.exists())
+        lines = [json.loads(line) for line in cloned_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["sessionId"], cloned_sid)
+        self.assertEqual(lines[0]["content"], "hello world")
+
+        # Original jsonl untouched
+        orig_lines = [json.loads(line) for line in s1_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(orig_lines[0]["sessionId"], "sess-a1")
+
+        # 5. Tasks cloned
+        cloned_task_dir = root / "tasks" / cloned_sid
+        self.assertTrue(cloned_task_dir.exists())
+        self.assertTrue((cloned_task_dir / "note.md").exists())
+
+        # 6. Workspace session cloned
+        self.assertTrue((root / "workspace" / "sessions" / cloned_sid / "state.txt").exists())
+
+        # 7. Artifact index cloned
+        cloned_art = root / "artifact-index" / f"{cloned_sid}.json"
+        self.assertTrue(cloned_art.exists())
+        self.assertIn(cloned_sid, cloned_art.read_text(encoding="utf-8"))
+
+    def test_same_edition_same_account_blocked(self):
+        from core import migrate as migrate_mod
+        from core.safety import MigrationBlocked
+
+        with self.assertRaises(MigrationBlocked):
+            migrate_mod.run_migrate(
+                {
+                    "from_edition": "domestic",
+                    "to_edition": "domestic",
+                    "source_uid": UID_A,
+                    "target_uid": UID_A,
+                    "items": {"sessions": True},
+                }
+            )
 
 
 if __name__ == "__main__":
