@@ -18,8 +18,21 @@ if str(ROOT) not in sys.path:
 from core.editions import make_paths
 from core.safety import ClientRunningError, SchemaIncompatible
 from core import sessions as sessions_mod
-from backend.app import app
-from fastapi.testclient import TestClient
+from backend.app import (
+    CopySessionsBody,
+    ExportSessionsBody,
+    api_sessions,
+    api_sessions_copy,
+    api_sessions_export,
+    app,
+)
+
+try:
+    from fastapi.testclient import TestClient
+    HAS_TEST_CLIENT = True
+except Exception:
+    TestClient = None  # type: ignore
+    HAS_TEST_CLIENT = False
 
 
 class TestSessionsTab(unittest.TestCase):
@@ -498,47 +511,78 @@ class TestSessionsTab(unittest.TestCase):
             self.assertIn("# ", content)
 
     def test_api_sessions_endpoints(self):
-        client = TestClient(app)
+        if HAS_TEST_CLIENT and TestClient is not None:
+            client = TestClient(app)
 
-        # 1. GET /api/sessions
-        resp = client.get("/api/sessions?edition=domestic")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertTrue(data.get("total") >= 3)
-        self.assertEqual(len(data.get("sessions")), 3)
+            # 1. GET /api/sessions
+            resp = client.get("/api/sessions?edition=domestic")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertTrue(data.get("total") >= 3)
+            self.assertEqual(len(data.get("sessions")), 3)
 
-        # 2. POST /api/sessions/copy
-        copy_resp = client.post(
-            "/api/sessions/copy",
-            json={
-                "from_edition": "domestic",
-                "to_edition": "domestic",
-                "session_ids": ["sess-001"],
-                "target_uid": self.uid_a,
-                "clone_mode": True,
-                "title_suffix": " (测试克隆)",
-            },
-        )
-        self.assertEqual(copy_resp.status_code, 200)
-        cdata = copy_resp.json()
-        self.assertTrue(cdata.get("ok"))
-        self.assertEqual(cdata.get("copied"), 1)
+            # 2. POST /api/sessions/copy
+            copy_resp = client.post(
+                "/api/sessions/copy",
+                json={
+                    "from_edition": "domestic",
+                    "to_edition": "domestic",
+                    "session_ids": ["sess-001"],
+                    "target_uid": self.uid_a,
+                    "clone_mode": True,
+                    "title_suffix": " (测试克隆)",
+                },
+            )
+            self.assertEqual(copy_resp.status_code, 200)
+            cdata = copy_resp.json()
+            self.assertTrue(cdata.get("ok"))
+            self.assertEqual(cdata.get("copied"), 1)
 
-        # 3. POST /api/sessions/export JSON format
-        export_resp = client.post(
-            "/api/sessions/export",
-            json={
-                "edition": "domestic",
-                "session_ids": ["sess-001"],
-                "mode": "clean",
-                "format": "json",
-            },
-        )
-        self.assertEqual(export_resp.status_code, 200)
-        edata = export_resp.json()
-        self.assertTrue(edata.get("ok"))
-        self.assertEqual(edata.get("count"), 1)
-        self.assertTrue(len(edata.get("zip_base64")) > 0)
+            # 3. POST /api/sessions/export JSON format
+            export_resp = client.post(
+                "/api/sessions/export",
+                json={
+                    "edition": "domestic",
+                    "session_ids": ["sess-001"],
+                    "mode": "clean",
+                    "format": "json",
+                },
+            )
+            self.assertEqual(export_resp.status_code, 200)
+            edata = export_resp.json()
+            self.assertTrue(edata.get("ok"))
+            self.assertEqual(edata.get("count"), 1)
+            self.assertTrue(len(edata.get("zip_base64")) > 0)
+        else:
+            # Fallback: direct API handler test when TestClient is unavailable
+            data = api_sessions(edition="domestic")
+            self.assertTrue(data.get("total") >= 3)
+            self.assertEqual(len(data.get("sessions")), 3)
+
+            cdata = api_sessions_copy(
+                CopySessionsBody(
+                    from_edition="domestic",
+                    to_edition="domestic",
+                    session_ids=["sess-001"],
+                    target_uid=self.uid_a,
+                    clone_mode=True,
+                    title_suffix=" (测试克隆)",
+                )
+            )
+            self.assertTrue(cdata.get("ok"))
+            self.assertEqual(cdata.get("copied"), 1)
+
+            edata = api_sessions_export(
+                ExportSessionsBody(
+                    edition="domestic",
+                    session_ids=["sess-001"],
+                    mode="clean",
+                    format="json",
+                )
+            )
+            self.assertTrue(edata.get("ok"))
+            self.assertEqual(edata.get("count"), 1)
+            self.assertTrue(len(edata.get("zip_base64")) > 0)
 
     def test_copy_sessions_client_running_safety(self):
         from unittest.mock import patch
