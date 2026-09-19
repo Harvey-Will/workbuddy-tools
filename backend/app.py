@@ -9,10 +9,10 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,7 @@ else:
 
 from core import accounts as accounts_mod
 from core import migrate as migrate_mod
+from core import sessions as sessions_mod
 from core import tokens as tokens_mod
 from core import update as update_mod
 from core.editions import (
@@ -48,7 +49,7 @@ from core.safety import (
     WriteConflict,
 )
 
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 __version__ = APP_VERSION
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
@@ -117,6 +118,22 @@ class CreateBackupBody(BaseModel):
 
 class OpenUrlBody(BaseModel):
     url: str
+
+
+class CopySessionsBody(BaseModel):
+    from_edition: str
+    to_edition: str
+    session_ids: List[str]
+    target_uid: str
+    title_suffix: Optional[str] = " (副本)"
+    clone_mode: bool = False
+
+
+class ExportSessionsBody(BaseModel):
+    edition: str
+    session_ids: List[str]
+    mode: str = "clean"  # "clean" | "full"
+    format: str = "json"  # "json" | "zip"
 
 
 @app.middleware("http")
@@ -458,6 +475,81 @@ def api_backups_restore(body: RestoreBody) -> Dict[str, Any]:
         raise _map_safety(e)
     finally:
         _migrate_lock.release()
+
+
+@app.get("/api/sessions")
+def api_sessions(
+    edition: str = Query(...),
+    uid: Optional[str] = Query(None),
+    query: Optional[str] = Query(None),
+    sort_by: str = Query("updated_at"),
+    order: str = Query("desc"),
+) -> Dict[str, Any]:
+    ed = _norm(edition)
+    items = sessions_mod.list_sessions(ed, uid=uid, query=query, sort_by=sort_by, order=order)
+    return {
+        "edition": ed,
+        "total": len(items),
+        "sessions": items,
+    }
+
+
+@app.post("/api/sessions/copy")
+def api_sessions_copy(body: CopySessionsBody) -> Dict[str, Any]:
+    fe, te = _norm(body.from_edition), _norm(body.to_edition)
+    if not _migrate_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "busy", "message": "已有任务正在进行中，请稍后再试"},
+        )
+    try:
+        return sessions_mod.copy_sessions(
+            from_edition=fe,
+            to_edition=te,
+            session_ids=body.session_ids,
+            target_uid=body.target_uid,
+            title_suffix=body.title_suffix,
+            clone_mode=body.clone_mode,
+        )
+    except SafetyError as e:
+        raise _map_safety(e)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": "bad_request", "message": str(e)})
+    finally:
+        _migrate_lock.release()
+
+
+@app.post("/api/sessions/export")
+def api_sessions_export(body: ExportSessionsBody):
+    ed = _norm(body.edition)
+    if body.mode not in ("clean", "full"):
+        raise HTTPException(status_code=400, detail={"code": "bad_mode", "message": "mode 必须为 clean 或 full"})
+    if not body.session_ids:
+        raise HTTPException(status_code=400, detail={"code": "empty_sessions", "message": "未指定会话"})
+
+    items = sessions_mod.export_sessions_batch(ed, body.session_ids, mode=body.mode)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_bytes = sessions_mod.create_export_zip(items)
+    import base64
+    zip_b64 = base64.b64encode(zip_bytes).decode("ascii")
+    zip_filename = f"workbuddy_export_{stamp}.zip"
+
+    if body.format == "raw_zip":
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{zip_filename}"',
+                "Access-Control-Expose-Headers": "Content-Disposition",
+            },
+        )
+    return {
+        "ok": True,
+        "files": items,
+        "count": len(items),
+        "zip_base64": zip_b64,
+        "zip_filename": zip_filename,
+    }
 
 
 @app.get("/api/tokens/summary")

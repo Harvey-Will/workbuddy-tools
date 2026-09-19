@@ -45,3 +45,4 @@ scripts/gen_icons.py
 scripts/make_logo_1to1.py
 src-tauri/gen/
 docs/images/*.local.png
+docs/responsive_audit/

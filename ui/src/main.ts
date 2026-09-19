@@ -8,13 +8,14 @@ import {
   type MigrateJobInfo,
   type MigratePlan,
   type MigrateRunResult,
+  type SessionItem,
   type TokenSummary,
   type UpdateCheckResult,
   type WorkspaceInfo,
   ApiError,
 } from "./api";
 
-const APP_VERSION = "0.1.4";
+const APP_VERSION = "0.1.5";
 const GITHUB_REPO_URL = "https://github.com/Harvey-Will/workbuddy-tools";
 const GITHUB_ICON_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
@@ -51,7 +52,7 @@ const TRACKER_STAGES: TrackerStageDef[] = [
 ];
 
 const state = {
-  page: "accounts" as "accounts" | "migrate" | "tokens" | "about",
+  page: "accounts" as "accounts" | "sessions" | "migrate" | "tokens" | "about",
   editions: [] as EditionInfo[],
   edition: "domestic",
   accounts: [] as AccountInfo[],
@@ -77,6 +78,21 @@ const state = {
   currentBackupAccount: null as { uid: string; name: string } | null,
   isCheckingUpdate: false,
   latestUpdate: null as UpdateCheckResult | null,
+
+  // Sessions Tab State
+  sessionsEdition: "domestic",
+  sessionsAccountUid: "",
+  sessionsSearchQuery: "",
+  sessionsSortBy: "updated_at",
+  sessionsSortOrder: "desc",
+  sessionsList: [] as SessionItem[],
+  selectedSessionIds: new Set<string>(),
+  sessionsLoading: false,
+  sessionsCopyModalTargetSessionIds: [] as string[],
+  sessionsExportModalTargetSessionIds: [] as string[],
+  sessionsExportMode: "clean" as "clean" | "full",
+  isCopyingSessions: false,
+  isExportingSessions: false,
 };
 
 function $(sel: string, root: ParentNode = document): HTMLElement {
@@ -202,6 +218,7 @@ function renderShell(): void {
       </div>
       <nav class="nav">
         <button class="nav-item active" data-page="accounts">账号中心</button>
+        <button class="nav-item" data-page="sessions">对话</button>
         <button class="nav-item" data-page="migrate">迁移复制</button>
         <button class="nav-item" data-page="tokens">Token 统计</button>
         <button class="nav-item" data-page="about">关于</button>
@@ -239,6 +256,105 @@ function renderShell(): void {
         <div class="panel">
           <div class="panel-head"><h2>工作空间</h2></div>
           <div id="workspace-list" class="list"></div>
+        </div>
+      </section>
+
+      <section id="page-sessions" class="page">
+        <!-- Sessions KPI Mini Cards -->
+        <div class="sess-kpi-grid">
+          <div class="sess-kpi-card">
+            <div class="sess-kpi-icon">💬</div>
+            <div>
+              <div class="sess-kpi-val" id="sess-stat-total">0</div>
+              <div class="sess-kpi-label">全部对话总数</div>
+            </div>
+          </div>
+          <div class="sess-kpi-card">
+            <div class="sess-kpi-icon">🪙</div>
+            <div>
+              <div class="sess-kpi-val" id="sess-stat-tokens">0</div>
+              <div class="sess-kpi-label">总消耗 Token</div>
+            </div>
+          </div>
+          <div class="sess-kpi-card">
+            <div class="sess-kpi-icon">⚡</div>
+            <div>
+              <div class="sess-kpi-val" id="sess-stat-hit-rate">0.0%</div>
+              <div class="sess-kpi-label">Prompt 综合缓存命中率</div>
+            </div>
+          </div>
+          <div class="sess-kpi-card">
+            <div class="sess-kpi-icon">👥</div>
+            <div>
+              <div class="sess-kpi-val" id="sess-stat-accounts">0</div>
+              <div class="sess-kpi-label">涵盖账号数</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sessions Toolbar -->
+        <div class="panel sess-toolbar-panel">
+          <div class="sess-toolbar-row">
+            <div class="sess-filters-group">
+              <label class="sess-filter-item">
+                <span class="muted small">版本</span>
+                <select id="sess-edition-filter" class="select"></select>
+              </label>
+              <label class="sess-filter-item">
+                <span class="muted small">账号</span>
+                <select id="sess-account-filter" class="select" style="min-width:180px">
+                  <option value="">全部账号</option>
+                </select>
+              </label>
+              <div class="sess-search-wrap">
+                <span class="sess-search-icon">🔍</span>
+                <input id="sess-search" class="input" placeholder="搜索对话标题、ID、工作空间..." />
+                <button id="btn-sess-search-clear" class="sess-search-clear hidden" title="清空搜索">&times;</button>
+              </div>
+            </div>
+
+            <div class="sess-actions-group">
+              <label class="sess-filter-item">
+                <span class="muted small">排序</span>
+                <select id="sess-sort" class="select">
+                  <option value="updated_at:desc">最后活跃 (新到旧)</option>
+                  <option value="created_at:desc">创建时间 (新到旧)</option>
+                  <option value="tokens:desc">Token 消耗 (多到少)</option>
+                  <option value="cache_hit_rate:desc">缓存命中率 (高到低)</option>
+                  <option value="turns:desc">对话轮数 (多到少)</option>
+                  <option value="title:asc">标题字母排序 (A-Z)</option>
+                </select>
+              </label>
+              <button id="btn-refresh-sessions" class="btn">
+                <span>🔄</span> 刷新
+              </button>
+            </div>
+          </div>
+
+          <!-- Batch Floating Bar -->
+          <div id="sess-batch-bar" class="sess-batch-bar hidden">
+            <div class="sess-batch-info">
+              <span class="badge ok" id="sess-batch-count">已选 0 个对话</span>
+              <span class="muted small">支持跨账号克隆、跨端互通与批量导出</span>
+            </div>
+            <div class="sess-batch-btns">
+              <button id="btn-batch-clone" class="btn small" title="在当前账号建立副本备份">
+                <span>💾</span> 本账号备份
+              </button>
+              <button id="btn-batch-copy" class="btn small primary" title="复制到其他账号或跨端互通">
+                <span>📋</span> 复制到其他账号...
+              </button>
+              <button id="btn-batch-export" class="btn small" title="导出 Markdown 文档">
+                <span>📥</span> 导出 Markdown
+              </button>
+              <button id="btn-batch-clear" class="btn ghost small">取消选择</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sessions List / Table Panel -->
+        <div class="panel sess-table-panel">
+          <div id="sess-table-wrap" class="sess-table-wrap"></div>
         </div>
       </section>
 
@@ -533,7 +649,7 @@ function renderShell(): void {
       <div class="modal-body">
         <div class="update-modal-banner">
           <div class="update-badge-row">
-            <span class="badge ok" id="update-modal-ver">v0.1.4</span>
+            <span class="badge ok" id="update-modal-ver">v0.1.5</span>
             <span class="muted small" id="update-modal-date"></span>
           </div>
           <h4 id="update-modal-name" style="margin:0.4rem 0 0.2rem;font-size:14px;color:var(--ink)"></h4>
@@ -591,11 +707,109 @@ function renderShell(): void {
         <button id="btn-account-backup-done" class="btn">关闭</button>
       </div>
     </div>
+  </div>
+
+  <!-- Session Copy Modal -->
+  <div id="sess-copy-modal" class="modal-backdrop hidden">
+    <div class="modal-dialog sess-modal-dialog">
+      <div class="modal-header">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">📋</span>
+          <div>
+            <h3>复制会话到其他账号</h3>
+            <div class="muted small">支持同版本跨账号复制，以及国服 (国内版) 与国际服 (国际版) 双向互通</div>
+          </div>
+        </div>
+        <button id="btn-sess-copy-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body" style="gap:1rem">
+        <div class="sess-modal-section">
+          <label class="sess-modal-label">目标版本与账号：</label>
+          <div class="row" style="gap:0.75rem">
+            <select id="sess-copy-target-edition" class="select" style="flex:1"></select>
+            <select id="sess-copy-target-account" class="select wide" style="flex:1.5"></select>
+          </div>
+        </div>
+        <div class="sess-modal-section">
+          <label class="sess-modal-label">标题后缀（可选，用于区分副本）：</label>
+          <input id="sess-copy-title-suffix" class="input" placeholder="例如：(副本) 或 (迁移备份)" value=" (副本)" />
+        </div>
+        <div class="sess-modal-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <label class="sess-modal-label">待复制的会话列表：</label>
+            <span id="sess-copy-items-count" class="badge">0 个会话</span>
+          </div>
+          <div id="sess-copy-items-list" class="sess-modal-items-list"></div>
+        </div>
+        <div class="sess-hint-box">
+          💡 复制操作将自动生成唯一 UUID，克隆并重写历史 JSONL、历史任务及用量记录，原数据保持完好无损。
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-sess-copy-cancel" class="btn">取消</button>
+        <button id="btn-sess-copy-confirm" class="btn primary">确认复制</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Export Modal -->
+  <div id="sess-export-modal" class="modal-backdrop hidden">
+    <div class="modal-dialog sess-modal-dialog">
+      <div class="modal-header">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">📥</span>
+          <div>
+            <h3>导出对话为 Markdown 文档</h3>
+            <div class="muted small">选择导出内容格式，支持单文件导出与多文件自动打包</div>
+          </div>
+        </div>
+        <button id="btn-sess-export-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body" style="gap:1rem">
+        <div class="sess-export-modes-grid">
+          <div class="sess-mode-card active" id="mode-card-clean">
+            <div class="mode-card-header">
+              <span class="mode-card-icon">🟢</span>
+              <span class="mode-card-title">纯文本输出 (Clean Text)</span>
+              <span class="badge ok">日常阅读推荐</span>
+            </div>
+            <p class="mode-card-desc">
+              纯净易读的对话记录。仅保留用户提问与助手正文回答，自动剔除底层的系统指令、Tool Call 调用参数与复杂 JSON。
+            </p>
+          </div>
+          <div class="sess-mode-card" id="mode-card-full">
+            <div class="mode-card-header">
+              <span class="mode-card-icon">🛠️</span>
+              <span class="mode-card-title">带 Tool Call 输出 (Full Technical)</span>
+              <span class="badge">完整技术视图</span>
+            </div>
+            <p class="mode-card-desc">
+              完整技术回溯视图。保留深度思考过程 (Reasoning)、各步骤工具调用名称、输入入参及实际执行命令输出。
+            </p>
+          </div>
+        </div>
+        <div class="sess-modal-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">
+            <label class="sess-modal-label">准备导出的会话：</label>
+            <span id="sess-export-items-count" class="badge">0 个会话</span>
+          </div>
+          <div id="sess-export-items-list" class="sess-modal-items-list"></div>
+        </div>
+        <div class="sess-hint-box" id="sess-export-hint">
+          📦 选定 1 个对话时将直接下载 <code>.md</code> 文档；选定多个对话时将自动打包为 <code>.zip</code> 压缩包下载。
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-sess-export-cancel" class="btn">取消</button>
+        <button id="btn-sess-export-confirm" class="btn primary">开始导出并下载</button>
+      </div>
+    </div>
   </div>`;
 }
 
 const pageMeta: Record<string, [string, string]> = {
   accounts: ["账号中心", "查看双端账号并一键切换"],
+  sessions: ["对话管理", "分账号统一管理全部对话、指标分析与跨端复制导出"],
   migrate: ["迁移复制", "选择性复制会话、记忆、技能与 MCP"],
   tokens: ["Token 统计", "按模型查看输入输出与缓存命中"],
   about: ["关于", "产品说明"],
@@ -612,6 +826,7 @@ function setPage(page: string): void {
   const [title, desc] = pageMeta[page] || ["", ""];
   $("#page-title").textContent = title;
   $("#page-desc").textContent = desc;
+  if (page === "sessions") void loadSessions();
   if (page === "tokens") void loadTokens();
   if (page === "migrate") {
     renderTracker();
@@ -626,15 +841,571 @@ function fillEditionSelects(): void {
     .filter((e) => e.exists)
     .map((e) => `<option value="${e.key}">${escapeHtml(e.label)}</option>`)
     .join("");
-  ["#edition-select", "#mig-from", "#mig-to", "#backup-edition-select"].forEach((sel) => {
+  [
+    "#edition-select",
+    "#mig-from",
+    "#mig-to",
+    "#backup-edition-select",
+    "#sess-edition-filter",
+    "#sess-copy-target-edition",
+  ].forEach((sel) => {
     const el = document.querySelector<HTMLSelectElement>(sel);
     if (!el) return;
     const prev = el.value;
     el.innerHTML = opts || `<option value="">未检测到</option>`;
     if (prev && [...el.options].some((o) => o.value === prev)) el.value = prev;
     else if (sel === "#backup-edition-select" && state.backupsEdition) el.value = state.backupsEdition;
+    else if (sel === "#sess-edition-filter" && state.sessionsEdition) el.value = state.sessionsEdition;
     else if (state.edition) el.value = state.edition;
   });
+}
+
+/* ---------- sessions page ---------- */
+
+function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadText(filename: string, text: string): void {
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  downloadBlob(filename, blob);
+}
+
+function updateBatchBar(): void {
+  const bar = document.getElementById("sess-batch-bar");
+  const countPill = document.getElementById("sess-batch-count");
+  if (!bar || !countPill) return;
+  const count = state.selectedSessionIds.size;
+  if (count > 0) {
+    bar.classList.remove("hidden");
+    countPill.textContent = `已选 ${count} 个对话`;
+  } else {
+    bar.classList.add("hidden");
+  }
+}
+
+async function fillSessionsAccountFilter(): Promise<void> {
+  const el = document.getElementById("sess-account-filter") as HTMLSelectElement | null;
+  if (!el) return;
+  const prevVal = el.value || state.sessionsAccountUid;
+  try {
+    const res = await api.accounts(state.sessionsEdition);
+    const accounts = res.accounts || [];
+    let opts = `<option value="">全部账号 (${accounts.length})</option>`;
+    for (const a of accounts) {
+      const label = displayName(a);
+      opts += `<option value="${escapeHtml(a.uid)}">${escapeHtml(label)}</option>`;
+    }
+    el.innerHTML = opts;
+    if (prevVal && accounts.some((a) => a.uid === prevVal)) {
+      el.value = prevVal;
+      state.sessionsAccountUid = prevVal;
+    } else {
+      el.value = "";
+      state.sessionsAccountUid = "";
+    }
+  } catch {
+    el.innerHTML = `<option value="">全部账号</option>`;
+  }
+}
+
+async function loadSessions(): Promise<void> {
+  if (state.sessionsLoading) return;
+  state.sessionsLoading = true;
+  state.selectedSessionIds.clear();
+  updateBatchBar();
+
+  const wrap = document.getElementById("sess-table-wrap");
+  if (wrap) {
+    wrap.innerHTML = `
+      <div style="padding:2.5rem;text-align:center;color:var(--muted)">
+        <span class="banner-spinner" style="display:inline-block;margin-bottom:0.5rem"></span>
+        <div>正在加载对话列表与 Token 指标...</div>
+      </div>
+    `;
+  }
+
+  const sessEdFilter = document.getElementById("sess-edition-filter") as HTMLSelectElement | null;
+  if (sessEdFilter && state.sessionsEdition) {
+    sessEdFilter.value = state.sessionsEdition;
+  }
+
+  await fillSessionsAccountFilter();
+
+  try {
+    const res = await api.sessions(
+      state.sessionsEdition,
+      state.sessionsAccountUid || undefined,
+      state.sessionsSearchQuery || undefined,
+      state.sessionsSortBy,
+      state.sessionsSortOrder,
+    );
+    state.sessionsList = res.sessions || [];
+
+    // Calculate metrics
+    const totalSessions = state.sessionsList.length;
+    const totalTokens = state.sessionsList.reduce((acc, s) => acc + s.total_tokens, 0);
+    const totalPrompt = state.sessionsList.reduce(
+      (acc, s) => acc + (s.input_tokens >= s.cache_read_tokens ? s.input_tokens : s.input_tokens + s.cache_read_tokens),
+      0,
+    );
+    const totalCache = state.sessionsList.reduce((acc, s) => acc + s.cache_read_tokens, 0);
+    const overallHit = totalPrompt > 0 ? (totalCache / totalPrompt) * 100 : 0.0;
+    const acctsSet = new Set(state.sessionsList.map((s) => s.user_id).filter(Boolean));
+
+    const statTotal = document.getElementById("sess-stat-total");
+    const statTokens = document.getElementById("sess-stat-tokens");
+    const statHit = document.getElementById("sess-stat-hit-rate");
+    const statAccts = document.getElementById("sess-stat-accounts");
+
+    if (statTotal) statTotal.textContent = String(totalSessions);
+    if (statTokens) statTokens.textContent = fmtNum(totalTokens);
+    if (statHit) statHit.textContent = overallHit.toFixed(1) + "%";
+    if (statAccts) statAccts.textContent = String(acctsSet.size);
+
+    renderSessionsTable();
+  } catch (e) {
+    if (wrap) {
+      wrap.innerHTML = `
+        <div style="padding:2rem;text-align:center;color:var(--danger)">
+          <div>⚠️ 加载对话失败：${escapeHtml((e as Error).message)}</div>
+          <button id="btn-retry-sessions" class="btn small" style="margin-top:0.75rem">重试</button>
+        </div>
+      `;
+      document.getElementById("btn-retry-sessions")?.addEventListener("click", () => void loadSessions());
+    }
+    toast("加载对话列表失败: " + (e as Error).message);
+  } finally {
+    state.sessionsLoading = false;
+  }
+}
+
+function renderSessionsTable(): void {
+  const wrap = document.getElementById("sess-table-wrap");
+  if (!wrap) return;
+
+  if (state.sessionsList.length === 0) {
+    wrap.innerHTML = `
+      <div style="padding:3.5rem 1.5rem;text-align:center;color:var(--muted)">
+        <div style="font-size:38px;margin-bottom:0.6rem">💬</div>
+        <div style="font-weight:650;font-size:14.5px;color:var(--ink)">未找到匹配的对话记录</div>
+        <div style="font-size:12px;margin-top:0.35rem">
+          ${state.sessionsSearchQuery ? "请尝试清空或缩短搜索关键词" : "当前版本与账号下暂无对话，或客户端尚未产生历史记录"}
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const allSelected =
+    state.sessionsList.length > 0 &&
+    state.sessionsList.every((s) => state.selectedSessionIds.has(s.id));
+  const someSelected =
+    !allSelected && state.sessionsList.some((s) => state.selectedSessionIds.has(s.id));
+
+  let html = `
+    <table class="sess-table">
+      <thead>
+        <tr>
+          <th style="width:38px;text-align:center">
+            <input type="checkbox" id="sess-master-check" ${allSelected ? "checked" : ""} />
+          </th>
+          <th style="min-width:240px">对话标题 / ID</th>
+          <th style="min-width:130px">归属账号</th>
+          <th style="min-width:95px">轮数 / 消息</th>
+          <th style="min-width:170px">Token 消耗明细</th>
+          <th style="min-width:120px">Prompt 缓存命中</th>
+          <th style="min-width:105px">最后活跃</th>
+          <th style="min-width:150px;text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const s of state.sessionsList) {
+    const isChecked = state.selectedSessionIds.has(s.id);
+    const hitPct = (s.cache_hit_rate * 100).toFixed(1);
+    let hitBadgeClass = "zero";
+    let hitText = "0%";
+    if (s.cache_hit_rate >= 0.8) {
+      hitBadgeClass = "high";
+      hitText = `⚡ ${hitPct}%`;
+    } else if (s.cache_hit_rate >= 0.5) {
+      hitBadgeClass = "mid";
+      hitText = `⚡ ${hitPct}%`;
+    } else if (s.cache_hit_rate > 0) {
+      hitBadgeClass = "low";
+      hitText = `⚡ ${hitPct}%`;
+    }
+
+    const edLabel = s.edition === "international" ? "国际版" : "国内版";
+    const cwdName = s.cwd ? s.cwd.split(/[\\/]/).filter(Boolean).pop() || s.cwd : "";
+
+    html += `
+      <tr class="${isChecked ? "selected" : ""}" data-sid="${escapeHtml(s.id)}">
+        <td style="text-align:center">
+          <input type="checkbox" class="sess-row-check" data-sid="${escapeHtml(s.id)}" ${isChecked ? "checked" : ""} />
+        </td>
+        <td>
+          <div class="sess-title-cell">
+            <div class="sess-title-text" title="${escapeHtml(s.raw_title || s.title)}">
+              ${escapeHtml(s.title)}
+            </div>
+            <div class="sess-meta-sub">
+              ${s.model && s.model !== "unknown" ? `<span class="sess-model-tag">${escapeHtml(s.model)}</span>` : ""}
+              <span class="sess-id-pill" title="点击复制完整 ID: ${escapeHtml(s.id)}" data-copy-id="${escapeHtml(s.id)}" style="cursor:pointer;font-family:monospace;font-size:10.5px;color:var(--muted)">
+                ${escapeHtml(s.id.slice(0, 8))}📋
+              </span>
+              ${cwdName ? `<span title="${escapeHtml(s.cwd)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px">📁 ${escapeHtml(cwdName)}</span>` : ""}
+            </div>
+          </div>
+        </td>
+        <td>
+          <div style="font-weight:600;font-size:12px;color:var(--ink)">
+            ${escapeHtml(s.account_name)}
+          </div>
+          <div class="muted small" style="font-size:11px">
+            <span class="badge ${s.edition === "international" ? "primary" : ""}">${edLabel}</span>
+          </div>
+        </td>
+        <td>
+          <div style="font-weight:600">${s.turns} <span class="muted small" style="font-weight:normal">轮</span></div>
+          <div class="muted small">${s.message_count} 条消息</div>
+        </td>
+        <td>
+          <div class="sess-tokens-cell">
+            <div class="sess-tokens-total">${fmtNum(s.total_tokens)} <span class="muted small" style="font-weight:normal">Tokens</span></div>
+            <div class="sess-tokens-detail" title="输入: ${s.input_tokens.toLocaleString()} | 缓存读取: ${s.cache_read_tokens.toLocaleString()} | 输出: ${s.output_tokens.toLocaleString()}">
+              入 ${fmtNum(s.input_tokens)} · 缓 ${fmtNum(s.cache_read_tokens)} · 出 ${fmtNum(s.output_tokens)}
+            </div>
+          </div>
+        </td>
+        <td>
+          <span class="hit-badge ${hitBadgeClass}">
+            ${hitText}
+          </span>
+        </td>
+        <td>
+          <div style="font-size:12px" title="${fmtTime(s.last_activity_at)}">
+            ${fmtRelativeTime(s.last_activity_at ? new Date(s.last_activity_at).toISOString() : undefined)}
+          </div>
+        </td>
+        <td style="text-align:right">
+          <div class="sess-actions-cell" style="justify-content:flex-end">
+            <button class="btn-icon-action" data-action="clone" data-sid="${escapeHtml(s.id)}" title="在当前账号快速建立副本备份">
+              <span>💾</span> 备份
+            </button>
+            <button class="btn-icon-action" data-action="copy" data-sid="${escapeHtml(s.id)}" title="复制到其他账号或跨端互通">
+              <span>📋</span> 复制
+            </button>
+            <button class="btn-icon-action" data-action="export" data-sid="${escapeHtml(s.id)}" title="导出为 Markdown 文档">
+              <span>📥</span> 导出
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }
+
+  html += `
+      </tbody>
+    </table>
+  `;
+
+  wrap.innerHTML = html;
+
+  // Master checkbox indeterminate handling
+  const masterCheck = document.getElementById("sess-master-check") as HTMLInputElement | null;
+  if (masterCheck) {
+    masterCheck.indeterminate = someSelected;
+    masterCheck.addEventListener("change", () => {
+      if (masterCheck.checked) {
+        state.sessionsList.forEach((s) => state.selectedSessionIds.add(s.id));
+      } else {
+        state.selectedSessionIds.clear();
+      }
+      renderSessionsTable();
+      updateBatchBar();
+    });
+  }
+
+  // Row checkboxes
+  wrap.querySelectorAll<HTMLInputElement>(".sess-row-check").forEach((cb) => {
+    cb.addEventListener("change", (e) => {
+      e.stopPropagation();
+      const sid = cb.dataset.sid;
+      if (!sid) return;
+      if (cb.checked) state.selectedSessionIds.add(sid);
+      else state.selectedSessionIds.delete(sid);
+      renderSessionsTable();
+      updateBatchBar();
+    });
+  });
+
+  // Click to copy session ID
+  wrap.querySelectorAll<HTMLElement>("[data-copy-id]").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const sid = el.dataset.copyId;
+      if (!sid) return;
+      void navigator.clipboard.writeText(sid);
+      toast("已复制会话 ID: " + sid);
+    });
+  });
+
+  // Action buttons on rows
+  wrap.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      const sid = btn.dataset.sid;
+      if (!sid) return;
+      if (action === "clone") {
+        void cloneSessions([sid]);
+      } else if (action === "copy") {
+        openCopyModal([sid]);
+      } else if (action === "export") {
+        openExportModal([sid]);
+      }
+    });
+  });
+}
+
+async function cloneSessions(sessionIds: string[], titleSuffix: string = " (副本)"): Promise<void> {
+  if (!sessionIds.length) return;
+  const targetUid = state.sessionsAccountUid || state.currentUid || (state.accounts[0]?.uid ?? "");
+  if (!targetUid) {
+    toast("未找到有效目标账号");
+    return;
+  }
+  try {
+    toast("正在创建备份副本...");
+    const res = await api.copySessions({
+      from_edition: state.sessionsEdition,
+      to_edition: state.sessionsEdition,
+      session_ids: sessionIds,
+      target_uid: targetUid,
+      clone_mode: true,
+      title_suffix: titleSuffix,
+    });
+    toast(`已成功创建 ${res.copied} 个会话备份副本！`);
+    await loadSessions();
+  } catch (e) {
+    const err = e as ApiError;
+    if (err.code === "client_running" || err.status === 409) {
+      toast("客户端正在运行，请完全退出 WorkBuddy 后再复制会话。");
+    } else {
+      toast("备份副本创建失败: " + (e as Error).message);
+    }
+  }
+}
+
+async function fillTargetAccountsForModal(targetEdition: string): Promise<void> {
+  const acctSelect = document.getElementById("sess-copy-target-account") as HTMLSelectElement | null;
+  if (!acctSelect) return;
+  acctSelect.innerHTML = `<option value="">加载中...</option>`;
+  try {
+    const res = await api.accounts(targetEdition);
+    const accounts = res.accounts || [];
+    if (!accounts.length) {
+      acctSelect.innerHTML = `<option value="">未找到任何账号</option>`;
+      return;
+    }
+    let opts = "";
+    for (const a of accounts) {
+      const isCur = a.is_current ? " (当前在线)" : "";
+      opts += `<option value="${escapeHtml(a.uid)}">${escapeHtml(displayName(a))}${isCur}</option>`;
+    }
+    acctSelect.innerHTML = opts;
+    if (res.current_uid) {
+      acctSelect.value = res.current_uid;
+    }
+  } catch {
+    acctSelect.innerHTML = `<option value="">获取账号失败</option>`;
+  }
+}
+
+function openCopyModal(sessionIds: string[]): void {
+  state.sessionsCopyModalTargetSessionIds = sessionIds;
+  const modal = document.getElementById("sess-copy-modal");
+  const countBadge = document.getElementById("sess-copy-items-count");
+  const listWrap = document.getElementById("sess-copy-items-list");
+  const targetEdSelect = document.getElementById("sess-copy-target-edition") as HTMLSelectElement | null;
+
+  if (!modal) return;
+  if (countBadge) countBadge.textContent = `${sessionIds.length} 个会话`;
+
+  if (listWrap) {
+    const items = state.sessionsList.filter((s) => sessionIds.includes(s.id));
+    listWrap.innerHTML = items
+      .map(
+        (s) => `
+        <div class="sess-modal-item-row">
+          <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.title)}</span>
+          <span class="muted small">${s.turns} 轮 · ${fmtNum(s.total_tokens)} Tokens</span>
+        </div>
+      `,
+      )
+      .join("");
+  }
+
+  if (targetEdSelect) {
+    const opts = state.editions
+      .filter((e) => e.exists)
+      .map((e) => `<option value="${e.key}">${escapeHtml(e.label)}</option>`)
+      .join("");
+    targetEdSelect.innerHTML = opts;
+    targetEdSelect.value = state.sessionsEdition;
+    void fillTargetAccountsForModal(targetEdSelect.value);
+  }
+
+  modal.classList.remove("hidden");
+}
+
+async function doCopySessions(): Promise<void> {
+  const targetEdSelect = document.getElementById("sess-copy-target-edition") as HTMLSelectElement | null;
+  const targetAcctSelect = document.getElementById("sess-copy-target-account") as HTMLSelectElement | null;
+  const titleSuffixInput = document.getElementById("sess-copy-title-suffix") as HTMLInputElement | null;
+  const confirmBtn = document.getElementById("btn-sess-copy-confirm") as HTMLButtonElement | null;
+
+  if (!targetEdSelect || !targetAcctSelect) return;
+  const targetEdition = targetEdSelect.value;
+  const targetUid = targetAcctSelect.value;
+  const titleSuffix = titleSuffixInput?.value ?? " (副本)";
+  const sessionIds = state.sessionsCopyModalTargetSessionIds;
+
+  if (!targetUid) {
+    toast("请选择有效的目标账号");
+    return;
+  }
+  if (!sessionIds.length) {
+    toast("未选定任何会话");
+    return;
+  }
+
+  if (confirmBtn) {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "复制中...";
+  }
+
+  try {
+    const res = await api.copySessions({
+      from_edition: state.sessionsEdition,
+      to_edition: targetEdition,
+      session_ids: sessionIds,
+      target_uid: targetUid,
+      title_suffix: titleSuffix,
+    });
+    toast(`已成功复制 ${res.copied} 个会话！`);
+    const modal = document.getElementById("sess-copy-modal");
+    if (modal) modal.classList.add("hidden");
+    state.selectedSessionIds.clear();
+    await loadSessions();
+  } catch (e) {
+    const err = e as ApiError;
+    if (err.code === "client_running" || err.status === 409) {
+      toast("检测到客户端正在运行，请完全退出客户端后再复制。");
+    } else {
+      toast("会话复制失败: " + (e as Error).message);
+    }
+  } finally {
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "确认复制";
+    }
+  }
+}
+
+function openExportModal(sessionIds: string[]): void {
+  state.sessionsExportModalTargetSessionIds = sessionIds;
+  const modal = document.getElementById("sess-export-modal");
+  const countBadge = document.getElementById("sess-export-items-count");
+  const listWrap = document.getElementById("sess-export-items-list");
+  const hintBox = document.getElementById("sess-export-hint");
+
+  if (!modal) return;
+  if (countBadge) countBadge.textContent = `${sessionIds.length} 个对话`;
+
+  if (hintBox) {
+    if (sessionIds.length === 1) {
+      hintBox.innerHTML = `📄 选定 1 个对话，将直接下载 <code>.md</code> Markdown 文档。`;
+    } else {
+      hintBox.innerHTML = `📦 选定 ${sessionIds.length} 个对话，将自动打包为 <code>.zip</code> 压缩包并包含各个独立 Markdown 文件。`;
+    }
+  }
+
+  if (listWrap) {
+    const items = state.sessionsList.filter((s) => sessionIds.includes(s.id));
+    listWrap.innerHTML = items
+      .map(
+        (s) => `
+        <div class="sess-modal-item-row">
+          <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.title)}</span>
+          <span class="muted small">${s.turns} 轮 · ${fmtNum(s.total_tokens)} Tokens</span>
+        </div>
+      `,
+      )
+      .join("");
+  }
+
+  modal.classList.remove("hidden");
+}
+
+async function doExportSessions(): Promise<void> {
+  const sessionIds = state.sessionsExportModalTargetSessionIds;
+  if (!sessionIds.length) {
+    toast("未选定任何待导出的会话");
+    return;
+  }
+
+  const confirmBtn = document.getElementById("btn-sess-export-confirm") as HTMLButtonElement | null;
+  if (confirmBtn) {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "正在生成文档...";
+  }
+
+  try {
+    const res = await api.exportSessions({
+      edition: state.sessionsEdition,
+      session_ids: sessionIds,
+      mode: state.sessionsExportMode,
+    });
+
+    if (sessionIds.length === 1 && res.files && res.files[0]) {
+      const file = res.files[0];
+      downloadText(file.filename, file.content);
+      toast(`已下载 Markdown 文档: ${file.filename}`);
+    } else if (res.zip_base64) {
+      const binary = atob(res.zip_base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/zip" });
+      downloadBlob(res.zip_filename || "workbuddy_export.zip", blob);
+      toast(`已导出并打包 ${res.count} 个对话为 ZIP 压缩包！`);
+    } else if (res.files && res.files.length) {
+      for (const f of res.files) {
+        downloadText(f.filename, f.content);
+      }
+      toast(`已下载 ${res.files.length} 个 Markdown 文档！`);
+    }
+
+    const modal = document.getElementById("sess-export-modal");
+    if (modal) modal.classList.add("hidden");
+  } catch (e) {
+    toast("导出失败: " + (e as Error).message);
+  } finally {
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "开始导出并下载";
+    }
+  }
 }
 
 function applyConcurrencyLock(): void {
@@ -2069,6 +2840,7 @@ function bind(): void {
     try {
       await loadEditions();
       await loadAccounts();
+      if (state.page === "sessions") await loadSessions();
       if (state.page === "tokens") await loadTokens();
       if (state.page === "migrate") await loadBackups();
     } catch (e) {
@@ -2078,11 +2850,140 @@ function bind(): void {
   ($("#edition-select") as HTMLSelectElement).addEventListener("change", async (e) => {
     state.edition = (e.target as HTMLSelectElement).value;
     state.backupsEdition = state.edition;
+    state.sessionsEdition = state.edition;
+    const sessEd = document.getElementById("sess-edition-filter") as HTMLSelectElement | null;
+    if (sessEd) sessEd.value = state.sessionsEdition;
+    const bkEd = document.getElementById("backup-edition-select") as HTMLSelectElement | null;
+    if (bkEd) bkEd.value = state.backupsEdition;
     renderPill();
     await loadAccounts();
+    if (state.page === "sessions") await loadSessions();
     if (state.page === "tokens") await loadTokens();
     if (state.page === "migrate") await loadBackups();
   });
+
+  // Sessions Tab Listeners
+  const sessEdFilter = document.getElementById("sess-edition-filter") as HTMLSelectElement | null;
+  if (sessEdFilter) {
+    sessEdFilter.addEventListener("change", async (e) => {
+      state.sessionsEdition = (e.target as HTMLSelectElement).value;
+      await fillSessionsAccountFilter();
+      await loadSessions();
+    });
+  }
+
+  const sessAcctFilter = document.getElementById("sess-account-filter") as HTMLSelectElement | null;
+  if (sessAcctFilter) {
+    sessAcctFilter.addEventListener("change", async (e) => {
+      state.sessionsAccountUid = (e.target as HTMLSelectElement).value;
+      await loadSessions();
+    });
+  }
+
+  const sessSearch = document.getElementById("sess-search") as HTMLInputElement | null;
+  const sessSearchClear = document.getElementById("btn-sess-search-clear") as HTMLButtonElement | null;
+  let searchTimer: number | null = null;
+  if (sessSearch) {
+    sessSearch.addEventListener("input", (e) => {
+      const q = (e.target as HTMLInputElement).value;
+      state.sessionsSearchQuery = q;
+      if (sessSearchClear) {
+        sessSearchClear.classList.toggle("hidden", !q.trim());
+      }
+      if (searchTimer) window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(() => {
+        void loadSessions();
+      }, 250);
+    });
+  }
+  if (sessSearchClear && sessSearch) {
+    sessSearchClear.addEventListener("click", () => {
+      sessSearch.value = "";
+      state.sessionsSearchQuery = "";
+      sessSearchClear.classList.add("hidden");
+      void loadSessions();
+    });
+  }
+
+  const sessSort = document.getElementById("sess-sort") as HTMLSelectElement | null;
+  if (sessSort) {
+    sessSort.addEventListener("change", async (e) => {
+      const val = (e.target as HTMLSelectElement).value;
+      const parts = val.split(":");
+      state.sessionsSortBy = parts[0] || "updated_at";
+      state.sessionsSortOrder = parts[1] || "desc";
+      await loadSessions();
+    });
+  }
+
+  const sessRefreshBtn = document.getElementById("btn-refresh-sessions");
+  if (sessRefreshBtn) {
+    sessRefreshBtn.addEventListener("click", () => void loadSessions());
+  }
+
+  // Batch action bar buttons
+  document.getElementById("btn-batch-clone")?.addEventListener("click", () => {
+    void cloneSessions(Array.from(state.selectedSessionIds));
+  });
+  document.getElementById("btn-batch-copy")?.addEventListener("click", () => {
+    openCopyModal(Array.from(state.selectedSessionIds));
+  });
+  document.getElementById("btn-batch-export")?.addEventListener("click", () => {
+    openExportModal(Array.from(state.selectedSessionIds));
+  });
+  document.getElementById("btn-batch-clear")?.addEventListener("click", () => {
+    state.selectedSessionIds.clear();
+    renderSessionsTable();
+    updateBatchBar();
+  });
+
+  // Session Copy Modal listeners
+  const closeCopyModal = () => {
+    document.getElementById("sess-copy-modal")?.classList.add("hidden");
+  };
+  document.getElementById("btn-sess-copy-close")?.addEventListener("click", closeCopyModal);
+  document.getElementById("btn-sess-copy-cancel")?.addEventListener("click", closeCopyModal);
+  const copyModal = document.getElementById("sess-copy-modal");
+  if (copyModal) {
+    copyModal.addEventListener("click", (e) => {
+      if (e.target === copyModal) closeCopyModal();
+    });
+  }
+  const copyTargetEd = document.getElementById("sess-copy-target-edition") as HTMLSelectElement | null;
+  if (copyTargetEd) {
+    copyTargetEd.addEventListener("change", (e) => {
+      void fillTargetAccountsForModal((e.target as HTMLSelectElement).value);
+    });
+  }
+  document.getElementById("btn-sess-copy-confirm")?.addEventListener("click", () => void doCopySessions());
+
+  // Session Export Modal listeners
+  const closeExportModal = () => {
+    document.getElementById("sess-export-modal")?.classList.add("hidden");
+  };
+  document.getElementById("btn-sess-export-close")?.addEventListener("click", closeExportModal);
+  document.getElementById("btn-sess-export-cancel")?.addEventListener("click", closeExportModal);
+  const exportModal = document.getElementById("sess-export-modal");
+  if (exportModal) {
+    exportModal.addEventListener("click", (e) => {
+      if (e.target === exportModal) closeExportModal();
+    });
+  }
+  const modeClean = document.getElementById("mode-card-clean");
+  const modeFull = document.getElementById("mode-card-full");
+  if (modeClean && modeFull) {
+    modeClean.addEventListener("click", () => {
+      state.sessionsExportMode = "clean";
+      modeClean.classList.add("active");
+      modeFull.classList.remove("active");
+    });
+    modeFull.addEventListener("click", () => {
+      state.sessionsExportMode = "full";
+      modeFull.classList.add("active");
+      modeClean.classList.remove("active");
+    });
+  }
+  document.getElementById("btn-sess-export-confirm")?.addEventListener("click", () => void doExportSessions());
   ($("#mig-from") as HTMLSelectElement).addEventListener("change", () => void fillMigrateSelects());
   ($("#mig-to") as HTMLSelectElement).addEventListener("change", () => void fillMigrateSelects());
   $("#btn-plan").addEventListener("click", () => void loadPlan());
@@ -2392,8 +3293,17 @@ async function init(): Promise<void> {
 
   // Support direct URL routing for screenshots / demo links
   const targetPage = params.get("page");
-  if (targetPage && ["accounts", "migrate", "tokens", "about"].includes(targetPage)) {
+  if (targetPage && ["accounts", "sessions", "migrate", "tokens", "about"].includes(targetPage)) {
     setPage(targetPage);
+  }
+  if (targetPage === "sessions") {
+    const edParam = params.get("edition");
+    if (edParam) state.sessionsEdition = edParam;
+    const uidParam = params.get("uid");
+    if (uidParam) state.sessionsAccountUid = uidParam;
+    const qParam = params.get("query");
+    if (qParam) state.sessionsSearchQuery = qParam;
+    await loadSessions();
   }
   if (targetPage === "migrate") {
     const fromParam = params.get("from");

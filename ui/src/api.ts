@@ -174,6 +174,75 @@ export interface BackupItem {
   files?: BackupFileEntry[];
 }
 
+export interface SessionItem {
+  id: string;
+  edition: EditionKey;
+  user_id: string;
+  account_name: string;
+  title: string;
+  raw_title: string;
+  custom_title: string;
+  status: string;
+  cwd: string;
+  model: string;
+  created_at: number | null;
+  updated_at: number | null;
+  last_activity_at: number | null;
+  turns: number;
+  message_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  cache_hit_rate: number;
+  has_jsonl: boolean;
+}
+
+export interface SessionCopyRequest {
+  from_edition: string;
+  to_edition: string;
+  session_ids: string[];
+  target_uid: string;
+  title_suffix?: string;
+  clone_mode?: boolean;
+}
+
+export interface SessionCopyResult {
+  ok: boolean;
+  copied: number;
+  from_edition: string;
+  to_edition: string;
+  target_uid: string;
+  session_id_map: Record<string, string>;
+  details?: {
+    sessions: number;
+    content_files: number;
+    tasks: number;
+    usage: number;
+  };
+}
+
+export interface SessionExportRequest {
+  edition: string;
+  session_ids: string[];
+  mode: "clean" | "full";
+  format?: "json" | "zip";
+}
+
+export interface ExportedFileItem {
+  session_id: string;
+  filename: string;
+  content: string;
+}
+
+export interface SessionExportResult {
+  ok: boolean;
+  files: ExportedFileItem[];
+  count: number;
+  zip_base64?: string;
+  zip_filename?: string;
+}
+
 export class ApiError extends Error {
   code?: string;
   status?: number;
@@ -284,11 +353,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function isDemoMode(): boolean {
+  if (typeof window !== "undefined") {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("demo") === "1" || p.get("demo") === "true") return true;
+  }
   return false;
 }
 
 export function setDemoMode(_enable: boolean): void {
-  // Release build: demo mode permanently disabled
+  // Demo mode toggled via URL parameter (?demo=1)
 }
 
 export const api = {
@@ -436,5 +509,34 @@ export const api = {
   },
   systemVersion: (): Promise<{ version: string; repo_url: string }> => {
     return request<{ version: string; repo_url: string }>("/api/system/version");
+  },
+  sessions: (
+    edition: string,
+    uid?: string,
+    query?: string,
+    sortBy?: string,
+    order?: string,
+  ) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.getSessions(edition, uid, query, sortBy, order));
+    const p = new URLSearchParams({ edition });
+    if (uid) p.set("uid", uid);
+    if (query) p.set("query", query);
+    if (sortBy) p.set("sort_by", sortBy);
+    if (order) p.set("order", order);
+    return request<{ edition: string; total: number; sessions: SessionItem[] }>(`/api/sessions?${p}`);
+  },
+  copySessions: (body: SessionCopyRequest) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.copySessions(body));
+    return request<SessionCopyResult>("/api/sessions/copy", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  exportSessions: (body: SessionExportRequest) => {
+    if (isDemoMode()) return Promise.resolve(mockStore.exportSessions(body));
+    return request<SessionExportResult>("/api/sessions/export", {
+      method: "POST",
+      body: JSON.stringify({ ...body, format: body.format || "json" }),
+    });
   },
 };

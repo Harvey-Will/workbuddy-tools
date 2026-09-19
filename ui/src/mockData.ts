@@ -5,6 +5,11 @@ import type {
   MigrateJobInfo,
   MigratePlan,
   MigrateRunResult,
+  SessionCopyRequest,
+  SessionCopyResult,
+  SessionExportRequest,
+  SessionExportResult,
+  SessionItem,
   TokenSummary,
   WorkspaceInfo,
 } from "./api";
@@ -572,6 +577,236 @@ class MockStore {
     };
   }
 
+  mockSessions: Record<string, SessionItem[]> = {
+    domestic: [
+      {
+        id: "sess-d01-arch-gateway",
+        edition: "domestic",
+        user_id: "11111111-aaaa-4000-8000-000000000001",
+        account_name: "Dev-Alpha (主账号)",
+        title: "构建高并发微服务网关架构方案",
+        raw_title: "构建高并发微服务网关架构方案",
+        custom_title: "",
+        status: "completed",
+        cwd: "E:\\projects\\gateway-service",
+        model: "claude-3-7-sonnet",
+        created_at: Date.now() - 3 * 24 * 3600 * 1000,
+        updated_at: Date.now() - 40 * 60 * 1000,
+        last_activity_at: Date.now() - 40 * 60 * 1000,
+        turns: 18,
+        message_count: 42,
+        input_tokens: 125000,
+        output_tokens: 18400,
+        cache_read_tokens: 112000,
+        total_tokens: 143400,
+        cache_hit_rate: 0.896,
+        has_jsonl: true,
+      },
+      {
+        id: "sess-d02-ui-components",
+        edition: "domestic",
+        user_id: "11111111-aaaa-4000-8000-000000000001",
+        account_name: "Dev-Alpha (主账号)",
+        title: "重构前端组件库与响应式状态流",
+        raw_title: "重构前端组件库与响应式状态流",
+        custom_title: "",
+        status: "completed",
+        cwd: "E:\\workbuddy-tools\\ui",
+        model: "deepseek-v3",
+        created_at: Date.now() - 5 * 24 * 3600 * 1000,
+        updated_at: Date.now() - 3 * 3600 * 1000,
+        last_activity_at: Date.now() - 3 * 3600 * 1000,
+        turns: 24,
+        message_count: 56,
+        input_tokens: 88500,
+        output_tokens: 14200,
+        cache_read_tokens: 72000,
+        total_tokens: 102700,
+        cache_hit_rate: 0.8136,
+        has_jsonl: true,
+      },
+      {
+        id: "sess-d03-migrate-pipeline",
+        edition: "domestic",
+        user_id: "22222222-bbbb-4000-8000-000000000002",
+        account_name: "Demo-Tester (测试环境)",
+        title: "Python 数据迁移流水线自动化调优",
+        raw_title: "Python 数据迁移流水线自动化调优",
+        custom_title: "",
+        status: "completed",
+        cwd: "E:\\workbuddy-tools\\backend",
+        model: "gemini-2.5-pro",
+        created_at: Date.now() - 1 * 24 * 3600 * 1000,
+        updated_at: Date.now() - 6 * 3600 * 1000,
+        last_activity_at: Date.now() - 6 * 3600 * 1000,
+        turns: 12,
+        message_count: 28,
+        input_tokens: 45000,
+        output_tokens: 9500,
+        cache_read_tokens: 28000,
+        total_tokens: 54500,
+        cache_hit_rate: 0.6222,
+        has_jsonl: true,
+      },
+    ],
+    international: [
+      {
+        id: "sess-i01-mcp-sandbox",
+        edition: "international",
+        user_id: "33333333-cccc-4000-8000-000000000003",
+        account_name: "Global-Lead (跨国协同)",
+        title: "MCP 连接器全生命周期管理与安全沙箱",
+        raw_title: "MCP 连接器全生命周期管理与安全沙箱",
+        custom_title: "",
+        status: "completed",
+        cwd: "C:\\Workspace\\mcp-cluster",
+        model: "claude-3-7-sonnet",
+        created_at: Date.now() - 2 * 24 * 3600 * 1000,
+        updated_at: Date.now() - 2 * 3600 * 1000,
+        last_activity_at: Date.now() - 2 * 3600 * 1000,
+        turns: 15,
+        message_count: 34,
+        input_tokens: 96000,
+        output_tokens: 16800,
+        cache_read_tokens: 88000,
+        total_tokens: 112800,
+        cache_hit_rate: 0.9167,
+        has_jsonl: true,
+      },
+      {
+        id: "sess-i02-token-analysis",
+        edition: "international",
+        user_id: "33333333-cccc-4000-8000-000000000003",
+        account_name: "Global-Lead (跨国协同)",
+        title: "LLM 提示词工程与 Cache 命中率分析",
+        raw_title: "LLM 提示词工程与 Cache 命中率分析",
+        custom_title: "",
+        status: "completed",
+        cwd: "C:\\Workspace\\llm-bench",
+        model: "gemini-2.5-flash",
+        created_at: Date.now() - 4 * 24 * 3600 * 1000,
+        updated_at: Date.now() - 12 * 3600 * 1000,
+        last_activity_at: Date.now() - 12 * 3600 * 1000,
+        turns: 8,
+        message_count: 18,
+        input_tokens: 32000,
+        output_tokens: 6100,
+        cache_read_tokens: 0,
+        total_tokens: 38100,
+        cache_hit_rate: 0.0,
+        has_jsonl: true,
+      },
+    ],
+  };
+
+  getSessions(
+    edition: string,
+    uid?: string,
+    query?: string,
+    sortBy: string = "updated_at",
+    order: string = "desc",
+  ): { edition: string; total: number; sessions: SessionItem[] } {
+    let list = [...(this.mockSessions[edition] || [])];
+    if (uid) {
+      list = list.filter((s) => s.user_id === uid);
+    }
+    if (query && query.trim()) {
+      const q = query.trim().toLowerCase();
+      list = list.filter(
+        (s) =>
+          s.title.toLowerCase().includes(q) ||
+          s.id.toLowerCase().includes(q) ||
+          s.cwd.toLowerCase().includes(q) ||
+          s.account_name.toLowerCase().includes(q),
+      );
+    }
+    const reverse = order.toLowerCase() !== "asc";
+    if (sortBy === "created_at") {
+      list.sort((a, b) => (reverse ? (b.created_at || 0) - (a.created_at || 0) : (a.created_at || 0) - (b.created_at || 0)));
+    } else if (sortBy === "tokens" || sortBy === "total_tokens") {
+      list.sort((a, b) => (reverse ? b.total_tokens - a.total_tokens : a.total_tokens - b.total_tokens));
+    } else if (sortBy === "cache_hit_rate") {
+      list.sort((a, b) => (reverse ? b.cache_hit_rate - a.cache_hit_rate : a.cache_hit_rate - b.cache_hit_rate));
+    } else if (sortBy === "turns") {
+      list.sort((a, b) => (reverse ? b.turns - a.turns : a.turns - b.turns));
+    } else {
+      list.sort((a, b) => (reverse ? (b.updated_at || 0) - (a.updated_at || 0) : (a.updated_at || 0) - (b.updated_at || 0)));
+    }
+    return {
+      edition,
+      total: list.length,
+      sessions: list,
+    };
+  }
+
+  copySessions(body: SessionCopyRequest): SessionCopyResult {
+    const fromList = this.mockSessions[body.from_edition] || [];
+    const toList = this.mockSessions[body.to_edition] || [];
+    const idMap: Record<string, string> = {};
+    const suffix = body.title_suffix || " (副本)";
+
+    for (const sid of body.session_ids) {
+      const found = fromList.find((s) => s.id === sid);
+      if (found) {
+        const newSid = `sess-clone-${Math.random().toString(36).substring(2, 9)}`;
+        idMap[sid] = newSid;
+        const isSame = body.from_edition === body.to_edition && found.user_id === body.target_uid;
+        const newTitle = body.clone_mode || isSame ? `${found.title}${suffix}` : found.title;
+        toList.unshift({
+          ...found,
+          id: newSid,
+          edition: body.to_edition as any,
+          user_id: body.target_uid,
+          account_name: "目标账号",
+          title: newTitle,
+          raw_title: newTitle,
+          updated_at: Date.now(),
+          last_activity_at: Date.now(),
+        });
+      }
+    }
+    this.mockSessions[body.to_edition] = toList;
+    return {
+      ok: true,
+      copied: Object.keys(idMap).length,
+      from_edition: body.from_edition,
+      to_edition: body.to_edition,
+      target_uid: body.target_uid,
+      session_id_map: idMap,
+      details: {
+        sessions: Object.keys(idMap).length,
+        content_files: Object.keys(idMap).length * 2,
+        tasks: Object.keys(idMap).length,
+        usage: Object.keys(idMap).length,
+      },
+    };
+  }
+
+  exportSessions(body: SessionExportRequest): SessionExportResult {
+    const list = this.mockSessions[body.edition] || [];
+    const files = body.session_ids.map((sid) => {
+      const sess = list.find((s) => s.id === sid);
+      const title = sess?.title || "未命名对话";
+      const hitPct = ((sess?.cache_hit_rate || 0) * 100).toFixed(1);
+      const modeNote = body.mode === "clean" ? "纯文本输出" : "完整模式（含 Tool Call & 思考）";
+      let content = `# ${title}\n\n- **会话 ID**: \`${sid}\`\n- **Token 消耗**: ${sess?.total_tokens || 0}\n- **缓存命中率**: ${hitPct}%\n- **导出模式**: ${modeNote}\n\n---\n\n### 👤 用户\n\n你好，请帮我分析当前项目的架构。\n\n---\n\n`;
+      if (body.mode === "full") {
+        content += `<details>\n<summary>💭 思考过程 (Reasoning)</summary>\n\n正在检索项目配置文件与依赖关系树...\n</details>\n\n<details>\n<summary>🛠️ 工具调用: <code>read_file</code> (completed)</summary>\n\n**参数:**\n\`\`\`json\n{"path": "package.json"}\n\`\`\`\n\n**执行结果:**\n\`\`\`\n{"name": "mock-project", "version": "1.0.0"}\n\`\`\`\n</details>\n\n---\n\n`;
+      }
+      content += `### 🤖 助手\n\n当前项目架构清晰，模块划分合理。\n\n---\n`;
+      return {
+        session_id: sid,
+        filename: `${title.replace(/[\s\/\\]+/g, "_")}_${sid.substring(0, 8)}.md`,
+        content,
+      };
+    });
+    return {
+      ok: true,
+      files,
+      count: files.length,
+    };
+  }
+
   checkUpdate(): {
     current_version: string;
     latest_version: string;
@@ -584,11 +819,11 @@ class MockStore {
     error: null;
   } {
     return {
-      current_version: "0.1.4",
-      latest_version: "0.1.4",
+      current_version: "0.1.5",
+      latest_version: "0.1.5",
       has_update: false,
-      release_name: "v0.1.4 正式版",
-      release_notes: "🎉 当前为最新正式版。\n- 支持同版本账号间全量数据无损迁移\n- 账号中心卡片专属即时快照与一键还原\n- 优化双端账号与工作空间管理\n- 强化在线原子快照与迁移流水线",
+      release_name: "v0.1.5 正式版",
+      release_notes: "🎉 当前为最新正式版。\n- 新增「对话」管理标签页，分账号统一管理全部对话\n- 对话级 Token 消耗分析与 Prompt 缓存命中率洞察\n- 对话跨账号复制、国服与国际服互通及本账号建立备份\n- 对话导出为 Markdown 文档（支持纯文本与完整 Tool Call 模式）",
       published_at: new Date().toISOString(),
       html_url: "https://github.com/Harvey-Will/workbuddy-tools/releases",
       download_url: "https://github.com/Harvey-Will/workbuddy-tools/releases/latest",

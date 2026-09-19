@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-tools"
-version = "0.1.4"
+version = "0.1.5"
 description = "WorkBuddy Tools desktop"
 authors = ["you"]
 edition = "2021"

@@ -36,6 +36,7 @@ def run():
 
     targets = [
         ("account-center.png", f"http://127.0.0.1:{port}/?demo=1&page=accounts&clean=1"),
+        ("sessions.png", f"http://127.0.0.1:{port}/?demo=1&page=sessions&clean=1"),
         ("migration.png", f"http://127.0.0.1:{port}/?demo=1&page=migrate&from=domestic&to=international&plan=1&clean=1"),
         ("token-usage.png", f"http://127.0.0.1:{port}/?demo=1&page=tokens&range=7d&clean=1"),
     ]
