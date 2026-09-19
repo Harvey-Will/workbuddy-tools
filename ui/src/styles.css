@@ -748,17 +748,25 @@ button {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.5rem;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.75rem 1.25rem;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    padding: 0;
+    gap: 0.55rem;
   }
   .nav {
     flex-direction: row;
     flex-wrap: wrap;
+    gap: 4px;
   }
   .side-foot {
     margin-top: 0;
     border-top: 0;
+    padding: 0;
   }
   .charts {
     grid-template-columns: 1fr;
@@ -770,6 +778,38 @@ button {
   .topbar {
     padding-left: 1rem;
     padding-right: 1rem;
+  }
+}
+
+@media (max-width: 680px) {
+  .sidebar {
+    padding: 0.6rem 0.85rem;
+  }
+  .brand-sub {
+    display: none;
+  }
+  .nav-item {
+    padding: 0.45rem 0.6rem;
+    font-size: 12.5px;
+  }
+  .cards {
+    grid-template-columns: 1fr;
+  }
+  .sess-search-wrap {
+    min-width: 100%;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 540px) {
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .top-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
 }
 
@@ -1034,6 +1074,11 @@ button {
   margin-top: 1.2rem;
 }
 
+#backup-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
 .backup-table {
   width: 100%;
   border-collapse: collapse;
@@ -1048,12 +1093,14 @@ button {
   font-weight: 600;
   border-bottom: 1px solid var(--line);
   font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .backup-table td {
   padding: 0.65rem 0.6rem;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
+  white-space: nowrap;
 }
 
 .backup-table tr:last-child td {
@@ -1387,6 +1434,12 @@ button {
   grid-template-columns: 1.55fr 1fr;
   gap: 0.75rem;
   margin-bottom: 0.9rem;
+}
+
+@media (max-width: 900px) {
+  .token-charts-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .daily-chart-box, .donut-chart-box {
@@ -1948,6 +2001,15 @@ button {
 @media (max-width: 900px) {
   .sess-kpi-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 580px) {
+  .sess-kpi-grid {
+    grid-template-columns: 1fr;
+  }
+  .sess-export-modes-grid {
+    grid-template-columns: 1fr;
   }
 }
 
