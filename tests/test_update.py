@@ -97,7 +97,7 @@ class TestUpdateModule(unittest.TestCase):
         from backend.app import api_system_version, api_open_url, OpenUrlBody, HTTPException, __version__
         v = api_system_version()
         self.assertEqual(v["version"], __version__)
-        self.assertEqual(v["version"], "0.1.4")
+        self.assertEqual(v["version"], "0.1.5")
         self.assertIn("github.com", v["repo_url"])
 
         with patch("webbrowser.open") as mock_open:

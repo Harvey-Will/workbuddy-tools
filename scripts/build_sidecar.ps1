@@ -29,6 +29,7 @@ Remove-Item (Join-Path $root "dist\sidecar") -Recurse -Force -ErrorAction Silent
   --hidden-import core.migrate `
   --hidden-import core.tokens `
   --hidden-import core.models `
+  --hidden-import core.sessions `
   --hidden-import uvicorn.logging `
   --hidden-import uvicorn.loops.auto `
   --hidden-import uvicorn.loops.asyncio `
