@@ -60,23 +60,34 @@ def _sanitize_filename(name: str) -> str:
 
 
 def find_session_jsonl(paths: AppPaths, session_id: str) -> Optional[Path]:
-    """Locate the jsonl file for a session within paths.projects_dir."""
-    if not paths.projects_dir.exists():
-        return None
+    """Locate the jsonl file for a session within paths.projects_dir or workspace_sessions_dir."""
     try:
         safe_sid = validate_path_component(session_id, label="session_id")
     except UnsafePath:
         return None
 
     # 1. Direct match: projects/*/{session_id}.jsonl
-    matches = list(paths.projects_dir.glob(f"*/{safe_sid}.jsonl"))
-    if matches:
-        return matches[0]
+    if paths.projects_dir.exists():
+        matches = list(paths.projects_dir.glob(f"*/{safe_sid}.jsonl"))
+        if matches:
+            return matches[0]
 
-    # 2. Match in subagents or nested dirs
-    nested = list(paths.projects_dir.glob(f"**/{safe_sid}.jsonl"))
-    if nested:
-        return nested[0]
+        # Nested in subagents or project subdirs
+        nested = list(paths.projects_dir.glob(f"**/{safe_sid}.jsonl"))
+        if nested:
+            return nested[0]
+
+    # 2. Match in workspace/sessions
+    if paths.workspace_sessions_dir.exists():
+        ws_file = paths.workspace_sessions_dir / f"{safe_sid}.jsonl"
+        if ws_file.is_file():
+            return ws_file
+        ws_direct = paths.workspace_sessions_dir / safe_sid
+        if ws_direct.is_file():
+            return ws_direct
+        nested_ws = list(paths.workspace_sessions_dir.glob(f"**/{safe_sid}.jsonl"))
+        if nested_ws:
+            return nested_ws[0]
 
     return None
 
@@ -248,7 +259,7 @@ def list_sessions(
         clauses = []
         params: List[Any] = []
         if "deleted_at" in cols:
-            clauses.append("deleted_at IS NULL")
+            clauses.append("(deleted_at IS NULL OR deleted_at = 0 OR deleted_at = '')")
         if uid:
             clauses.append("user_id = ?")
             params.append(uid)
@@ -468,13 +479,30 @@ def copy_sessions(
         tconn.close()
 
     # 2. Content cloning & rewrite (projects jsonl, workspace sessions, blobs, file-history)
-    copied_content = migrate_session_content(validated_sids, source, target, session_id_map=id_map)
-
-    # 3. Tasks cloning
-    copied_tasks = migrate_tasks(source, target, validated_sids, session_id_map=id_map)
-
-    # 4. Usage records cloning
-    copied_usage = migrate_session_usage(source, target, validated_sids, session_id_map=id_map)
+    try:
+        copied_content = migrate_session_content(validated_sids, source, target, session_id_map=id_map)
+        # 3. Tasks cloning
+        copied_tasks = migrate_tasks(source, target, validated_sids, session_id_map=id_map)
+        # 4. Usage records cloning (optional, graceful fallback if table missing)
+        copied_usage = 0
+        try:
+            copied_usage = migrate_session_usage(source, target, validated_sids, session_id_map=id_map)
+        except SchemaIncompatible:
+            copied_usage = 0
+    except Exception as e:
+        # Atomic cleanup: remove newly inserted session rows in target DB on failure
+        try:
+            cleanup_conn = sqlite3.connect(str(target.db_path))
+            try:
+                new_ids = list(id_map.values())
+                cleanup_ph = ",".join("?" for _ in new_ids)
+                cleanup_conn.cursor().execute(f"DELETE FROM sessions WHERE id IN ({cleanup_ph})", new_ids)
+                cleanup_conn.commit()
+            finally:
+                cleanup_conn.close()
+        except Exception:
+            pass
+        raise e
 
     return {
         "ok": True,
@@ -502,25 +530,40 @@ def _extract_text_blocks(content: Any) -> str:
             if isinstance(b, str):
                 parts.append(b)
             elif isinstance(b, dict):
-                t = b.get("text") or b.get("content")
+                t = b.get("text") or b.get("content") or b.get("output")
                 if t:
-                    parts.append(str(t))
+                    parts.append(_extract_text_blocks(t))
                 elif b.get("type") == "image_blob_ref":
                     parts.append("[附图]")
-        return "\n".join(parts)
+        return "\n".join(p for p in parts if p)
     if isinstance(content, dict):
         if "text" in content:
-            return str(content["text"])
+            return _extract_text_blocks(content["text"])
         if "content" in content:
             return _extract_text_blocks(content["content"])
+        if "output" in content:
+            return _extract_text_blocks(content["output"])
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except Exception:
+            return str(content)
     return str(content or "")
 
 
 def _clean_user_prompt(text: str) -> str:
-    """Remove injected system reminders and unwraps query tags."""
-    # Remove <system-reminder> blocks
-    clean = re.sub(r"<system-reminder[\s\S]*?</system-reminder>", "", text, flags=re.IGNORECASE)
-    clean = re.sub(r"^<user_query>([\s\S]*?)</user_query>$", r"\1", clean.strip(), flags=re.IGNORECASE)
+    """Remove injected system reminders, task notifications and unwraps query tags."""
+    clean = text
+    # Remove <system-reminder...>...</system-reminder>
+    clean = re.sub(r"<system-reminder[\s\S]*?</system-reminder>", "", clean, flags=re.IGNORECASE)
+    # Remove <task-notification...>...</task-notification>
+    clean = re.sub(r"<task-notification[\s\S]*?</task-notification>", "", clean, flags=re.IGNORECASE)
+    # Remove <conversation_history_summary...>...</conversation_history_summary>
+    clean = re.sub(r"<conversation_history_summary[\s\S]*?</conversation_history_summary>", "", clean, flags=re.IGNORECASE)
+    # Remove <browser-skill-overlay...>...</browser-skill-overlay>
+    clean = re.sub(r"<browser-skill-overlay[\s\S]*?</browser-skill-overlay>", "", clean, flags=re.IGNORECASE)
+    # Unwrap <user_query>...</user_query>
+    clean = re.sub(r"<user_query>([\s\S]*?)</user_query>", r"\1", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"</?user_query>", "", clean, flags=re.IGNORECASE)
     return clean.strip()
 
 
@@ -641,11 +684,43 @@ def export_session_markdown(
 
         if role == "user" or (msg_type == "message" and role == "user"):
             raw_user = _extract_text_blocks(item.get("content"))
-            user_text = _clean_user_prompt(raw_user) if mode == "clean" else raw_user.strip()
-            if user_text:
-                md.append("### 👤 用户\n")
-                md.append(f"{user_text}\n")
-                md.append("---\n")
+            if mode == "clean":
+                user_text = _clean_user_prompt(raw_user)
+                if user_text:
+                    md.append("### 👤 用户\n")
+                    md.append(f"{user_text}\n")
+                    md.append("---\n")
+            else:
+                # Full mode: handle task notifications cleanly
+                if "<task-notification" in raw_user:
+                    task_match = re.search(r"<task-notification[\s\S]*?</task-notification>", raw_user, flags=re.IGNORECASE)
+                    if task_match:
+                        task_text = task_match.group(0).strip()
+                        summary_m = re.search(r"<summary>([\s\S]*?)</summary>", task_text, flags=re.IGNORECASE)
+                        status_m = re.search(r"<status>([\s\S]*?)</status>", task_text, flags=re.IGNORECASE)
+                        task_id_m = re.search(r"<task-id>([\s\S]*?)</task-id>", task_text, flags=re.IGNORECASE)
+                        title_info = f" ({status_m.group(1)})" if status_m else ""
+                        if task_id_m:
+                            title_info = f" [Task {task_id_m.group(1)}]{title_info}"
+                        md.append("<details>")
+                        md.append(f"<summary>🔔 任务状态通知{title_info}</summary>\n")
+                        if summary_m:
+                            md.append(f"**摘要:** {summary_m.group(1).strip()}\n")
+                        md.append("```xml")
+                        md.append(task_text)
+                        md.append("```\n")
+                        md.append("</details>\n")
+                    remaining = re.sub(r"<task-notification[\s\S]*?</task-notification>", "", raw_user, flags=re.IGNORECASE).strip()
+                    if remaining:
+                        md.append("### 👤 用户\n")
+                        md.append(f"{remaining}\n")
+                        md.append("---\n")
+                else:
+                    user_text = raw_user.strip()
+                    if user_text:
+                        md.append("### 👤 用户\n")
+                        md.append(f"{user_text}\n")
+                        md.append("---\n")
 
         elif role == "assistant" or (msg_type == "message" and role == "assistant"):
             asst_text = _extract_text_blocks(item.get("content")).strip()
@@ -681,11 +756,7 @@ def export_session_markdown(
                 if res_item:
                     rendered_result_ids.add(res_item.get("id") or cid)
                     out = res_item.get("output")
-                    out_text = ""
-                    if isinstance(out, dict):
-                        out_text = str(out.get("text") or out.get("output") or json.dumps(out, ensure_ascii=False))
-                    else:
-                        out_text = str(out or "")
+                    out_text = _extract_text_blocks(out)
                     status = res_item.get("status") or "completed"
                 else:
                     out_text = "(无执行输出)"
@@ -708,7 +779,7 @@ def export_session_markdown(
                 if rid not in rendered_result_ids:
                     tool_name = item.get("name") or "Tool"
                     out = item.get("output")
-                    out_text = out.get("text") if isinstance(out, dict) else str(out or "")
+                    out_text = _extract_text_blocks(out)
                     md.append("<details>")
                     md.append(f"<summary>⚙️ 工具输出: <code>{tool_name}</code></summary>\n")
                     md.append("```")

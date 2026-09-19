@@ -551,6 +551,174 @@ class TestSessionsTab(unittest.TestCase):
                     target_uid=self.uid_a,
                 )
 
+    def test_copy_sessions_missing_session_usage_table_graceful(self):
+        # Create a clean DB without session_usage table
+        clean_home = Path(self._tmp.name) / "no_usage_home"
+        clean_home.mkdir(parents=True, exist_ok=True)
+        from core.editions import make_paths
+        import os
+        old_home = os.environ.get("WBT_DATA_HOME")
+        try:
+            os.environ["WBT_DATA_HOME"] = str(clean_home)
+            p = make_paths("domestic")
+            p.root.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(p.db_path))
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT, title TEXT, custom_title TEXT)")
+            conn.execute("INSERT INTO sessions VALUES ('no-usage-1', 'u-alpha', 'Independent Task', NULL)")
+            conn.commit()
+            conn.close()
+
+            # Copy should succeed without crashing on missing session_usage table
+            res = sessions_mod.copy_sessions(
+                from_edition="domestic",
+                to_edition="domestic",
+                session_ids=["no-usage-1"],
+                target_uid="u-alpha",
+                clone_mode=True,
+            )
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["copied"], 1)
+            cloned_sid = res["session_id_map"]["no-usage-1"]
+
+            # Verify target DB row exists
+            conn = sqlite3.connect(str(p.db_path))
+            row = conn.execute("SELECT id, title FROM sessions WHERE id = ?", (cloned_sid,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[1], "Independent Task (副本)")
+            conn.close()
+        finally:
+            if old_home is not None:
+                os.environ["WBT_DATA_HOME"] = old_home
+
+    def test_copy_sessions_atomic_rollback_on_content_failure(self):
+        from unittest.mock import patch
+        with patch("core.sessions.migrate_session_content", side_effect=IOError("Disk write simulated failure")):
+            with self.assertRaises(IOError):
+                sessions_mod.copy_sessions(
+                    from_edition="domestic",
+                    to_edition="domestic",
+                    session_ids=["sess-001"],
+                    target_uid=self.uid_a,
+                )
+
+        # Confirm no phantom clone rows were left behind in sessions table
+        conn = sqlite3.connect(str(self.dom_paths.db_path))
+        cur = conn.cursor()
+        cur.execute("SELECT id, title FROM sessions WHERE title LIKE '%(副本)%'")
+        phantom_rows = cur.fetchall()
+        conn.close()
+        self.assertEqual(len(phantom_rows), 0)
+
+    def test_clean_user_prompt_unanchored_and_tag_stripping(self):
+        # 1. Unanchored user query with leading/trailing text
+        text1 = "Here is project context.\n<user_query>请协助我编写单元测试</user_query>\nEnd of turn"
+        cleaned1 = sessions_mod._clean_user_prompt(text1)
+        self.assertNotIn("<user_query>", cleaned1)
+        self.assertNotIn("</user_query>", cleaned1)
+        self.assertIn("请协助我编写单元测试", cleaned1)
+
+        # 2. Task notification stripping
+        text2 = "<task-notification>\n<task-id>xyz123</task-id>\n<status>completed</status>\n</task-notification>"
+        cleaned2 = sessions_mod._clean_user_prompt(text2)
+        self.assertEqual(cleaned2, "")
+
+        # 3. Conversation history summary stripping
+        text3 = "<conversation_history_summary>\nPrior summary\n</conversation_history_summary>\n<user_query>当前进展如何？</user_query>"
+        cleaned3 = sessions_mod._clean_user_prompt(text3)
+        self.assertEqual(cleaned3, "当前进展如何？")
+
+    def test_export_session_markdown_structured_tool_output(self):
+        proj_dir = self.dom_paths.projects_dir / "workspace_proj"
+        tool_sid = "sess-tool-struct"
+
+        # Create session in DB
+        conn = sqlite3.connect(str(self.dom_paths.db_path))
+        conn.execute("INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)", (tool_sid, self.uid_a, "工具结构化输出测试"))
+        conn.commit()
+        conn.close()
+
+        lines = [
+            json.dumps({"type": "message", "role": "user", "sessionId": tool_sid, "content": "查看系统配置"}),
+            json.dumps({
+                "type": "function_call",
+                "sessionId": tool_sid,
+                "name": "system_info",
+                "callId": "call-sys-99",
+                "arguments": {"verbose": True},
+            }),
+            json.dumps({
+                "type": "function_call_result",
+                "sessionId": tool_sid,
+                "name": "system_info",
+                "callId": "call-sys-99",
+                "output": [{"type": "text", "text": "Platform: win32 | Arch: x64 | Node: v20.0.0"}],
+            }),
+            json.dumps({"type": "message", "role": "assistant", "sessionId": tool_sid, "content": "系统环境检测正常。"}),
+        ]
+        (proj_dir / f"{tool_sid}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        fname, md = sessions_mod.export_session_markdown("domestic", tool_sid, mode="full")
+        self.assertIn("🛠️ 工具调用: <code>system_info</code>", md)
+        # Verify output is clean text, not Python repr "[{'type': 'text'}]"
+        self.assertIn("Platform: win32 | Arch: x64 | Node: v20.0.0", md)
+        self.assertNotIn("[{'type':", md)
+
+    def test_export_session_markdown_task_notification_in_full_mode(self):
+        proj_dir = self.dom_paths.projects_dir / "workspace_proj"
+        notif_sid = "sess-task-notif"
+
+        conn = sqlite3.connect(str(self.dom_paths.db_path))
+        conn.execute("INSERT INTO sessions (id, user_id, title) VALUES (?, ?, ?)", (notif_sid, self.uid_a, "后台任务通知测试"))
+        conn.commit()
+        conn.close()
+
+        lines = [
+            json.dumps({"type": "message", "role": "user", "sessionId": notif_sid, "content": "启动后台构建"}),
+            json.dumps({
+                "type": "message",
+                "role": "user",
+                "sessionId": notif_sid,
+                "content": "<task-notification>\n<task-id>build-001</task-id>\n<status>completed</status>\n<summary>Build finished in 2.3s</summary>\n</task-notification>",
+            }),
+            json.dumps({"type": "message", "role": "assistant", "sessionId": notif_sid, "content": "构建已成功完成！"}),
+        ]
+        (proj_dir / f"{notif_sid}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        # In clean mode, task-notification must be stripped completely
+        _, clean_md = sessions_mod.export_session_markdown("domestic", notif_sid, mode="clean")
+        self.assertNotIn("task-notification", clean_md)
+        self.assertNotIn("build-001", clean_md)
+        self.assertIn("启动后台构建", clean_md)
+        self.assertIn("构建已成功完成！", clean_md)
+
+        # In full mode, task-notification must be rendered as a specialized notification block, not as a user message
+        _, full_md = sessions_mod.export_session_markdown("domestic", notif_sid, mode="full")
+        self.assertIn("🔔 任务状态通知 [Task build-001] (completed)", full_md)
+        self.assertIn("Build finished in 2.3s", full_md)
+
+    def test_list_sessions_deleted_at_zero_and_empty(self):
+        conn = sqlite3.connect(str(self.dom_paths.db_path))
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sessions (id, user_id, title, deleted_at) VALUES ('sess-del-0', 'u-a', 'Zero Del', 0)")
+        cur.execute("INSERT INTO sessions (id, user_id, title, deleted_at) VALUES ('sess-del-pos', 'u-a', 'Pos Del', 1789298692952)")
+        conn.commit()
+        conn.close()
+
+        sessions = sessions_mod.list_sessions("domestic")
+        sids = [s["id"] for s in sessions]
+        self.assertIn("sess-del-0", sids)
+        self.assertNotIn("sess-del-pos", sids)
+
+    def test_find_session_jsonl_in_workspace_sessions(self):
+        # Place a session in workspace_sessions_dir instead of projects
+        ws_dir = self.dom_paths.workspace_sessions_dir
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        (ws_dir / "sess-ws-special.jsonl").write_text('{"type": "message", "role": "user", "content": "hi"}', encoding="utf-8")
+
+        found = sessions_mod.find_session_jsonl(self.dom_paths, "sess-ws-special")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, "sess-ws-special.jsonl")
+
 
 if __name__ == "__main__":
     unittest.main()

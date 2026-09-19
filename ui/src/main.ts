@@ -932,6 +932,11 @@ async function loadSessions(): Promise<void> {
     `;
   }
 
+  const sessEdFilter = document.getElementById("sess-edition-filter") as HTMLSelectElement | null;
+  if (sessEdFilter && state.sessionsEdition) {
+    sessEdFilter.value = state.sessionsEdition;
+  }
+
   await fillSessionsAccountFilter();
 
   try {
@@ -2846,6 +2851,10 @@ function bind(): void {
     state.edition = (e.target as HTMLSelectElement).value;
     state.backupsEdition = state.edition;
     state.sessionsEdition = state.edition;
+    const sessEd = document.getElementById("sess-edition-filter") as HTMLSelectElement | null;
+    if (sessEd) sessEd.value = state.sessionsEdition;
+    const bkEd = document.getElementById("backup-edition-select") as HTMLSelectElement | null;
+    if (bkEd) bkEd.value = state.backupsEdition;
     renderPill();
     await loadAccounts();
     if (state.page === "sessions") await loadSessions();
@@ -3284,8 +3293,17 @@ async function init(): Promise<void> {
 
   // Support direct URL routing for screenshots / demo links
   const targetPage = params.get("page");
-  if (targetPage && ["accounts", "migrate", "tokens", "about"].includes(targetPage)) {
+  if (targetPage && ["accounts", "sessions", "migrate", "tokens", "about"].includes(targetPage)) {
     setPage(targetPage);
+  }
+  if (targetPage === "sessions") {
+    const edParam = params.get("edition");
+    if (edParam) state.sessionsEdition = edParam;
+    const uidParam = params.get("uid");
+    if (uidParam) state.sessionsAccountUid = uidParam;
+    const qParam = params.get("query");
+    if (qParam) state.sessionsSearchQuery = qParam;
+    await loadSessions();
   }
   if (targetPage === "migrate") {
     const fromParam = params.get("from");
