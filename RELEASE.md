@@ -29,6 +29,6 @@ powershell -ExecutionPolicy Bypass -File scripts/build_portable.ps1
 
 | 文件名 | 文件大小 | SHA256 校验码 |
 | :--- | :--- | :--- |
-| `workbuddy-tools.exe` | 19.50 MB | `95959e49d7f53429ac375b1272d1bb6a4f107faac45672a1c862f820594577b2` |
-| `WorkBuddyTools-portable-win64.zip` | 17.54 MB | `6af03f0688929ccc95217617d44757b751e43f6a7389119862e23b951e41069b` |
-| `WorkBuddyTools-portable-win64-v0.1.5.zip` | 17.54 MB | `6af03f0688929ccc95217617d44757b751e43f6a7389119862e23b951e41069b` |
+| `workbuddy-tools.exe` | 19.49 MB | `d1241f2e6598621880c214e97fa1112d38351cc70e86a65b560278d0a2337a4c` |
+| `WorkBuddyTools-portable-win64.zip` | 17.55 MB | `bd8217e05590e1b96da31674175ab791d21ba0872609eeafb97f81618078861e` |
+| `WorkBuddyTools-portable-win64-v0.1.5.zip` | 17.55 MB | `bd8217e05590e1b96da31674175ab791d21ba0872609eeafb97f81618078861e` |

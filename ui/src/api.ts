@@ -353,11 +353,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function isDemoMode(): boolean {
+  if (typeof window !== "undefined") {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("demo") === "1" || p.get("demo") === "true") return true;
+  }
   return false;
 }
 
 export function setDemoMode(_enable: boolean): void {
-  // Release build: demo mode permanently disabled
+  // Demo mode toggled via URL parameter (?demo=1)
 }
 
 export const api = {
