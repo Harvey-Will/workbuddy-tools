@@ -299,7 +299,8 @@ class MockStore {
       client_running: false,
       same_edition: sameEdition,
       same_account: sameAccount,
-      blocked: false,
+      blocked: sameAccount,
+      block_reason: sameAccount ? "源账号和目标账号相同，无需执行迁移。" : undefined,
       items: [
         { key: "sessions", label: "聊天会话", count: 32, note: "完整会话结构" },
         { key: "session_content", label: "会话内容与附件", count: 32, note: "含 96 个 jsonl 与附件 blobs" },
@@ -819,11 +820,11 @@ class MockStore {
     error: null;
   } {
     return {
-      current_version: "0.1.5",
-      latest_version: "0.1.5",
+      current_version: "0.1.5.1",
+      latest_version: "0.1.5.1",
       has_update: false,
-      release_name: "v0.1.5 正式版",
-      release_notes: "🎉 当前为最新正式版。\n- 新增「对话」管理标签页，分账号统一管理全部对话\n- 对话级 Token 消耗分析与 Prompt 缓存命中率洞察\n- 对话跨账号复制、国服与国际服互通及本账号建立备份\n- 对话导出为 Markdown 文档（支持纯文本与完整 Tool Call 模式）",
+      release_name: "v0.1.5.1 正式版",
+      release_notes: "🎉 当前为最新正式版。\n- 迁移配置体验全面优化：更改账号与版本即时自动刷新检测\n- 重新检测 WorkBuddy 运行状态，关闭客户端后即刻进入就绪模式\n- 细化迁移就绪与锁定状态流转体验",
       published_at: new Date().toISOString(),
       html_url: "https://github.com/Harvey-Will/workbuddy-tools/releases",
       download_url: "https://github.com/Harvey-Will/workbuddy-tools/releases/latest",

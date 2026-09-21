@@ -15,7 +15,7 @@ import {
   ApiError,
 } from "./api";
 
-const APP_VERSION = "0.1.5";
+const APP_VERSION = "0.1.5.1";
 const GITHUB_REPO_URL = "https://github.com/Harvey-Will/workbuddy-tools";
 const GITHUB_ICON_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
 
@@ -399,13 +399,13 @@ function renderShell(): void {
             <span class="muted">→</span>
             <label class="muted small">目标 <select id="mig-to" class="select"></select></label>
             <select id="mig-target" class="select wide"></select>
-            <button id="btn-plan" class="btn">预览</button>
+            <button id="btn-plan" class="btn" title="重新检测客户端运行状态并刷新配置">刷新</button>
           </div>
           <div id="mig-warn" class="banner warn hidden"></div>
           <div id="mig-items" class="check-grid"></div>
           <div class="row">
             <button id="btn-run" class="btn primary" disabled>执行迁移</button>
-            <span id="mig-hint" class="muted small">先预览再执行</span>
+            <span id="mig-hint" class="muted small">检测就绪后即可执行</span>
           </div>
         </div>
 
@@ -649,7 +649,7 @@ function renderShell(): void {
       <div class="modal-body">
         <div class="update-modal-banner">
           <div class="update-badge-row">
-            <span class="badge ok" id="update-modal-ver">v0.1.5</span>
+            <span class="badge ok" id="update-modal-ver">v0.1.5.1</span>
             <span class="muted small" id="update-modal-date"></span>
           </div>
           <h4 id="update-modal-name" style="margin:0.4rem 0 0.2rem;font-size:14px;color:var(--ink)"></h4>
@@ -830,7 +830,9 @@ function setPage(page: string): void {
   if (page === "tokens") void loadTokens();
   if (page === "migrate") {
     renderTracker();
-    void fillMigrateSelects();
+    void fillMigrateSelects().then(() => {
+      triggerAutoPlan();
+    });
     void loadBackups();
   }
   applyConcurrencyLock();
@@ -1558,6 +1560,7 @@ function renderAccounts(): void {
       ($("#mig-from") as HTMLSelectElement).value = state.edition;
       void fillMigrateSelects().then(() => {
         ($("#mig-source") as HTMLSelectElement).value = btn.dataset.src!;
+        triggerAutoPlan();
       });
     });
   });
@@ -1622,12 +1625,27 @@ async function loadAccounts(): Promise<void> {
   }
 }
 
+let planDebounceTimer: number | null = null;
+function triggerAutoPlan(): void {
+  if (planDebounceTimer) window.clearTimeout(planDebounceTimer);
+  planDebounceTimer = window.setTimeout(() => {
+    void loadPlan({ silent: true });
+  }, 60);
+}
+
 async function fillMigrateSelects(): Promise<void> {
-  const from = ($("#mig-from") as HTMLSelectElement).value || state.edition;
-  const to = ($("#mig-to") as HTMLSelectElement).value || state.edition;
+  const fromEl = $("#mig-from") as HTMLSelectElement | null;
+  const toEl = $("#mig-to") as HTMLSelectElement | null;
+  const from = fromEl?.value || state.edition;
+  const to = toEl?.value || state.edition;
   state.migFrom = from;
   state.migTo = to;
   await Promise.all([fillAccountOptions(from, "#mig-source"), fillAccountOptions(to, "#mig-target")]);
+  const srcEl = $("#mig-source") as HTMLSelectElement | null;
+  const tgtEl = $("#mig-target") as HTMLSelectElement | null;
+  if (from === to && srcEl?.value && tgtEl?.value === srcEl.value && (tgtEl?.options.length || 0) > 1) {
+    tgtEl!.selectedIndex = 1;
+  }
 }
 
 async function fillAccountOptions(edition: string, sel: string): Promise<void> {
@@ -1649,22 +1667,39 @@ async function fillAccountOptions(edition: string, sel: string): Promise<void> {
   }
 }
 
-async function loadPlan(): Promise<void> {
-  const from = ($("#mig-from") as HTMLSelectElement).value;
-  const to = ($("#mig-to") as HTMLSelectElement).value;
-  const source = ($("#mig-source") as HTMLSelectElement).value;
-  const target = ($("#mig-target") as HTMLSelectElement).value;
+async function loadPlan(options: { silent?: boolean } = {}): Promise<void> {
+  const from = ($("#mig-from") as HTMLSelectElement | null)?.value || "";
+  const to = ($("#mig-to") as HTMLSelectElement | null)?.value || "";
+  const source = ($("#mig-source") as HTMLSelectElement | null)?.value || "";
+  const target = ($("#mig-target") as HTMLSelectElement | null)?.value || "";
+
   if (!from || !to || !source) {
-    toast("请选择源账号");
+    if (!options.silent) toast("请选择源账号");
     return;
   }
+
+  const planBtn = document.getElementById("btn-plan") as HTMLButtonElement | null;
+  if (planBtn && !options.silent) {
+    planBtn.disabled = true;
+    planBtn.textContent = "检测中…";
+  }
+
   try {
-    const plan = await api.migratePlan({
-      from_edition: from,
-      to_edition: to,
-      source_uid: source,
-      target_uid: target || undefined,
-    });
+    const [plan, edData] = await Promise.all([
+      api.migratePlan({
+        from_edition: from,
+        to_edition: to,
+        source_uid: source,
+        target_uid: target || undefined,
+      }),
+      api.editions().catch(() => null),
+    ]);
+
+    if (edData?.editions) {
+      state.editions = edData.editions;
+      renderPill();
+    }
+
     state.migratePlan = plan;
     state.selectedItems = { ...(plan.default_items || {}) };
     const blockedKeys = new Set(plan.blocked_item_keys || []);
@@ -1675,7 +1710,7 @@ async function loadPlan(): Promise<void> {
         const checked = state.selectedItems[k] === true;
         const disabled = blockedKeys.has(k) || plan.client_running;
         return `
-        <label class="check-item">
+        <label class="check-item ${disabled ? "disabled-item" : ""}">
           <input type="checkbox" data-item="${k}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} />
           <div>
             <div><strong>${MIGRATE_LABELS[k] || k}</strong> <span class="muted small">×${item?.count ?? 0}</span></div>
@@ -1688,22 +1723,57 @@ async function loadPlan(): Promise<void> {
         state.selectedItems[cb.dataset.item!] = cb.checked;
       });
     });
+
     const warn = $("#mig-warn");
     const messages: string[] = [];
     if (plan.blocked && plan.block_reason) messages.push(plan.block_reason);
     if (plan.client_running) messages.push("客户端正在运行，请先完全退出 WorkBuddy / WorkBuddyAI 后再执行迁移。");
     for (const w of plan.warnings || []) messages.push(w);
+
     if (messages.length) {
       warn.textContent = messages.join(" ");
       warn.classList.remove("hidden");
-    } else warn.classList.add("hidden");
+    } else {
+      warn.classList.add("hidden");
+    }
+
     const runBtn = $("#btn-run") as HTMLButtonElement;
-    runBtn.disabled = Boolean(plan.blocked || plan.client_running);
-    $("#mig-hint").textContent = `${plan.source_uid.slice(0, 8)}… → ${(plan.target_uid || "").slice(0, 8)}…`;
-    $("#step2").classList.add("on");
-    toast(plan.blocked ? "当前组合不可迁移" : "已生成预览");
+    const canRun = Boolean(!plan.blocked && !plan.client_running && plan.target_uid);
+    runBtn.disabled = !canRun;
+
+    const hint = $("#mig-hint");
+    if (plan.client_running) {
+      hint.textContent = "客户端运行中，无法迁移";
+    } else if (plan.blocked) {
+      hint.textContent = plan.block_reason || "当前组合不可迁移";
+    } else if (!plan.target_uid) {
+      hint.textContent = "请选择目标账号";
+    } else {
+      hint.textContent = `${plan.source_uid.slice(0, 8)}… → ${plan.target_uid.slice(0, 8)}… (就绪)`;
+    }
+
+    if (canRun) {
+      $("#step2").classList.add("on");
+    } else {
+      $("#step2").classList.remove("on");
+    }
+
+    if (!options.silent) {
+      if (plan.client_running) {
+        toast("已刷新：检测到客户端仍在运行，请完全退出客户端");
+      } else if (plan.blocked) {
+        toast(plan.block_reason || "当前组合不可迁移");
+      } else {
+        toast("已刷新：客户端已就绪，已进入可迁移复制模式");
+      }
+    }
   } catch (e) {
-    toast((e as Error).message);
+    if (!options.silent) toast((e as Error).message);
+  } finally {
+    if (planBtn) {
+      planBtn.disabled = state.isMigrating;
+      planBtn.textContent = "刷新";
+    }
   }
 }
 
@@ -2842,7 +2912,10 @@ function bind(): void {
       await loadAccounts();
       if (state.page === "sessions") await loadSessions();
       if (state.page === "tokens") await loadTokens();
-      if (state.page === "migrate") await loadBackups();
+      if (state.page === "migrate") {
+        await loadBackups();
+        triggerAutoPlan();
+      }
     } catch (e) {
       toast((e as Error).message);
     }
@@ -2984,9 +3057,43 @@ function bind(): void {
     });
   }
   document.getElementById("btn-sess-export-confirm")?.addEventListener("click", () => void doExportSessions());
-  ($("#mig-from") as HTMLSelectElement).addEventListener("change", () => void fillMigrateSelects());
-  ($("#mig-to") as HTMLSelectElement).addEventListener("change", () => void fillMigrateSelects());
-  $("#btn-plan").addEventListener("click", () => void loadPlan());
+  const migFromEl = $("#mig-from") as HTMLSelectElement | null;
+  const migToEl = $("#mig-to") as HTMLSelectElement | null;
+  const migSrcEl = $("#mig-source") as HTMLSelectElement | null;
+  const migTgtEl = $("#mig-target") as HTMLSelectElement | null;
+
+  if (migFromEl) {
+    migFromEl.addEventListener("change", async () => {
+      const from = migFromEl.value;
+      state.migFrom = from;
+      await fillAccountOptions(from, "#mig-source");
+      triggerAutoPlan();
+    });
+  }
+  if (migToEl) {
+    migToEl.addEventListener("change", async () => {
+      const to = migToEl.value;
+      state.migTo = to;
+      await fillAccountOptions(to, "#mig-target");
+      const fromVal = migFromEl?.value;
+      if (fromVal === to && migSrcEl?.value && migTgtEl?.value === migSrcEl.value && (migTgtEl?.options.length || 0) > 1) {
+        migTgtEl!.selectedIndex = 1;
+      }
+      triggerAutoPlan();
+    });
+  }
+  if (migSrcEl) {
+    migSrcEl.addEventListener("change", () => {
+      triggerAutoPlan();
+    });
+  }
+  if (migTgtEl) {
+    migTgtEl.addEventListener("change", () => {
+      triggerAutoPlan();
+    });
+  }
+
+  $("#btn-plan").addEventListener("click", () => void loadPlan({ silent: false }));
   $("#btn-run").addEventListener("click", () => void runMigrate());
   $("#btn-token").addEventListener("click", () => void loadTokens());
   ($("#token-range") as HTMLSelectElement).addEventListener("change", (e) => {
@@ -3278,16 +3385,22 @@ async function init(): Promise<void> {
         renderTracker();
         applyConcurrencyLock();
       }).catch(() => {});
+    } else if (state.page === "migrate") {
+      triggerAutoPlan();
     }
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && state.isMigrating && state.activeJobId) {
-      void api.migrateGetJob(state.activeJobId).then((job) => {
-        state.currentJob = job;
-        renderTracker();
-        applyConcurrencyLock();
-      }).catch(() => {});
+    if (document.visibilityState === "visible") {
+      if (state.isMigrating && state.activeJobId) {
+        void api.migrateGetJob(state.activeJobId).then((job) => {
+          state.currentJob = job;
+          renderTracker();
+          applyConcurrencyLock();
+        }).catch(() => {});
+      } else if (state.page === "migrate") {
+        triggerAutoPlan();
+      }
     }
   });
 
@@ -3315,9 +3428,7 @@ async function init(): Promise<void> {
     const targetParam = params.get("target");
     if (sourceParam) ($("#mig-source") as HTMLSelectElement).value = sourceParam;
     if (targetParam) ($("#mig-target") as HTMLSelectElement).value = targetParam;
-    if (params.has("plan")) {
-      await loadPlan();
-    }
+    await loadPlan({ silent: true });
     await loadBackups();
   }
   if (targetPage === "tokens") {
