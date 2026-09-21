@@ -595,6 +595,16 @@ button {
   border-color: #c7d2fe;
 }
 
+.check-item.disabled-item {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--bg);
+}
+
+.check-item.disabled-item:hover {
+  border-color: var(--line);
+}
+
 .check-item input {
   margin: 0.15rem 0 0;
   accent-color: var(--primary);
