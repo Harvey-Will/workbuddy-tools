@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import sqlite3
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from .safety import (
     BackupCorrupted,
     BackupNotFound,
     ClientRunningError,
+    DataDirNotWritable,
     MigrationBlocked,
     SafetyError,
     SchemaIncompatible,
@@ -43,6 +45,26 @@ SESSION_SCOPED_ITEMS = {
     "tasks",
     "session_usage",
 }
+
+
+def _write_hint(data_root: Path, err: OSError) -> str:
+    """Turn an OS write failure into a message the user can act on.
+
+    macOS TCC is the usual cause: the WorkBuddy data directory sits under a
+    protected location, so the app can read it but not create anything inside
+    it until Full Disk Access is granted.
+    """
+    if sys.platform == "darwin":
+        return (
+            f"无法写入 {data_root}（{err.strerror or '权限不足'}）。"
+            "macOS 的隐私保护会阻止应用在此位置创建文件。"
+            "请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许本应用，"
+            "然后重新打开它再试。"
+        )
+    return (
+        f"无法写入 {data_root}（{err.strerror or '权限不足'}）。"
+        "请检查该目录的所有权与写入权限后重试。"
+    )
 
 KNOWN_ITEMS = tuple(DEFAULT_MIGRATE_ITEMS.keys())
 
@@ -112,13 +134,19 @@ def create_backup(paths: AppPaths, target_uid: str, label: str = "migrate") -> s
         )
     target_uid = validate_uid(target_uid)
     label = validate_path_component(label, label="label")
-    paths.backup_root.mkdir(parents=True, exist_ok=True)
+    try:
+        paths.backup_root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise DataDirNotWritable(_write_hint(paths.root, e)) from e
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     rand_suffix = uuid.uuid4().hex[:6]
     tag = f"{stamp}_{label}_{target_uid[:8]}_{rand_suffix}"
     backup_path = paths.backup_root / tag
     ensure_within(paths.backup_root, backup_path)
-    backup_path.mkdir(parents=True, exist_ok=True)
+    try:
+        backup_path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise DataDirNotWritable(_write_hint(paths.root, e)) from e
 
     file_manifests: List[Dict[str, Any]] = []
 

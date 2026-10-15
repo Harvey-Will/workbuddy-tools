@@ -41,6 +41,7 @@ from core.safety import (
     BackupCorrupted,
     BackupNotFound,
     ClientRunningError,
+    DataDirNotWritable,
     InvalidUID,
     MigrationBlocked,
     SafetyError,
@@ -200,6 +201,8 @@ def _map_safety(e: SafetyError) -> HTTPException:
     status = 400
     if isinstance(e, ClientRunningError):
         status = 409
+    elif isinstance(e, DataDirNotWritable):
+        status = 403
     elif isinstance(e, AccountNotFound):
         status = 404
     elif isinstance(e, BackupNotFound):

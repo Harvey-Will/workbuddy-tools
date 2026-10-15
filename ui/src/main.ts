@@ -2062,8 +2062,10 @@ async function runMigrate(): Promise<void> {
       toast("已有任务正在进行中，请稍后再试");
     } else if (err.code === "client_running" || err.status === 409) {
       toast("客户端正在运行，请先完全退出客户端再执行迁移");
+    } else if (err.code === "data_dir_not_writable") {
+      toast(err.message || "没有写入数据目录的权限，macOS 请为应用开启「完全磁盘访问权限」。");
     } else {
-      toast((e as Error).message);
+      toast(err.message || "迁移启动失败，请重试");
     }
     applyConcurrencyLock();
   }
@@ -3249,8 +3251,10 @@ function bind(): void {
           toast("已有任务正在进行中，请稍后再试");
         } else if (err.code === "client_running" || err.status === 409) {
           toast("客户端正在运行，请先完全退出客户端再创建快照");
+        } else if (err.code === "data_dir_not_writable") {
+          toast(err.message || "没有写入数据目录的权限，macOS 请为应用开启「完全磁盘访问权限」。");
         } else {
-          toast("创建快照失败: " + (e as Error).message);
+          toast("创建快照失败: " + (err.message || "未知错误"));
         }
       } finally {
         btn.textContent = "+ 创建即时快照";
@@ -3326,8 +3330,10 @@ function bind(): void {
           toast("已有任务正在进行中，请稍后再试");
         } else if (err.code === "client_running" || err.status === 409) {
           toast("客户端正在运行，请先完全退出客户端再创建快照");
+        } else if (err.code === "data_dir_not_writable") {
+          toast(err.message || "没有写入数据目录的权限，macOS 请为应用开启「完全磁盘访问权限」。");
         } else {
-          toast("创建快照失败: " + (e as Error).message);
+          toast("创建快照失败: " + (err.message || "未知错误"));
         }
       } finally {
         acctCreateBkBtn.textContent = "+ 创建即时快照";

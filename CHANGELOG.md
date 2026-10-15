@@ -33,6 +33,14 @@
 
   `connect_readonly()` 依次尝试 mode=ro → mode=ro&immutable=1 → 普通连接，并在函数内部立即执行一次真实读取，把失败点前移到连接阶段。已应用到 accounts.py / migrate.py / sessions.py 中全部只读场景（源库读取、schema 校验、会话与用量查询、SQLite 快照）。目标库（写入侧）仍保持普通连接。新增 `tests/test_readonly_db.py` 固化该契约。
 
+### 🔐 修复：写入数据目录失败时报裸 500，用户看不到原因
+- **新增 `DataDirNotWritable` 异常**：此前 `create_backup()` 里的 `mkdir()` 抛出 `PermissionError`，它既不是 `SafetyError` 子类、也没被 API 层捕获，最终以 `Internal Server Error` 呈现，UI 上只显示「迁移失败: Internal Server Error」，用户完全无法判断该做什么。
+- **新增 `_write_hint()`**：在 macOS 上把 `PermissionError` 转成可执行的中文指引（提示前往「系统设置 → 隐私与安全性 → 完全磁盘访问权限」授权后重试），其他平台则提示检查目录权限。
+- **API 映射为 403**：`_map_safety()` 为 `DataDirNotWritable` 增加 403 分支，错误码 `data_dir_not_writable` 会一路带到前端。
+- **UI 三处错误处理补齐**：迁移启动、创建即时快照、按账号创建快照的 catch 分支都新增该错误码的专门提示，直接展示后端给出的完整指引。
+
+> 说明：这是 macOS TCC 的预期行为——WorkBuddy 自身是沙盒应用（带 `com.apple.security.files.user-selected.read-write`），其数据目录会被标记为受保护位置，第三方工具需要用户手动授予「完全磁盘访问权限」才能写入。该权限只能由用户在系统设置中授予，工具无法代为获取。
+
 ### 🎨 修复：提示信息被弹窗遮挡
 - **Toast 层级提升**：`.toast` 原本 `z-index: 50`，而 `.modal-backdrop` 为 `z-index: 100` 且带有 `backdrop-filter: blur(4px)` 与半透明深色背景。结果任何在弹窗打开时触发的提示（例如点击备份后提示"客户端正在运行"）都被压在遮罩下方，文字被模糊化后完全无法阅读。现将层级提升至 `z-index: 300`。
 - **弹窗打开时 Toast 改到顶部居中**：原来固定在右下角，在弹窗覆盖屏幕时容易处于对话框后方被忽视。现在由 `toast()` 检测 `.modal-backdrop:not(.hidden)` 并切换 `toast--modal` 类，将提示移到顶部居中。使用 JS 判断而非 CSS `:has()` 选择器，以保证 macOS 11 上较旧的 WKWebView 行为一致。
