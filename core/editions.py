@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ EDITION_DEFS = {
         "short": "国内版",
         "dir_name": ".workbuddy",
         "process_names": ("WorkBuddy",),
+        # macOS .app bundle layout (Electron: bundle id under Contents/MacOS).
+        "macos_bundle": "WorkBuddy",
+        "macos_executable": "Electron",
     },
     "international": {
         "key": "international",
@@ -24,6 +28,8 @@ EDITION_DEFS = {
         "short": "国际版",
         "dir_name": ".workbuddy-ai",
         "process_names": ("WorkBuddyAI",),
+        "macos_bundle": "WorkBuddyAI",
+        "macos_executable": "Electron",
     },
 }
 
@@ -208,13 +214,62 @@ def client_looks_running(edition: str) -> bool:
     if not pgrep:
         return False
     for name in names:
-        try:
-            r = subprocess.run([pgrep, "-f", name], capture_output=True, text=True)
-            if r.returncode == 0 and r.stdout.strip():
-                return True
-        except Exception:
-            continue
+        # Exact process-name match only. "-f name" matches any command line that
+        # merely *mentions* the word (editors, greps, this tool's own UI), which
+        # would produce false "client running" blocks on macOS/Linux.
+        for args in ([pgrep, "-x", name], [pgrep, "-xi", f"{name}.app"]):
+            try:
+                r = subprocess.run(args, capture_output=True, text=True)
+                if r.returncode == 0 and r.stdout.strip():
+                    return True
+            except Exception:
+                continue
+        # macOS Electron bundles: the Mach-O entry point is "Electron"
+        # regardless of app name, so match the .app bundle path itself. The
+        # pattern must include "/Contents/MacOS" and the app name so unrelated
+        # system agents (loginwindow, WindowManager, ...) never match.
+        if platform.system() == "Darwin":
+            try:
+                r = subprocess.run(
+                    [pgrep, "-f", f".app/Contents/MacOS/.*{re.escape(name)}"],
+                    capture_output=True,
+                    text=True,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    return True
+            except Exception:
+                continue
     return False
+
+
+def _macos_app_candidates(edition: str) -> List[Path]:
+    """macOS clients ship as .app bundles whose real executable is not the
+    app name (Electron apps use Electron/WorkBuddy as the Mach-O entry)."""
+    key = normalize_edition(edition)
+    bundle = EDITION_DEFS[key].get("macos_bundle", "")
+    exe = EDITION_DEFS[key].get("macos_executable", "")
+    if not bundle or not exe:
+        return []
+
+    names = list(EDITION_DEFS[key]["process_names"])
+    out: List[Path] = []
+    app_dirs = [
+        Path("/Applications"),
+        Path("/Applications/Utilities"),
+        Path.home() / "Applications",
+    ]
+    # Lower-priority fallbacks: on macOS these are firmlinks that resolve to the
+    # same volume, so they only matter when the primary locations are missing.
+    if platform.system() == "Darwin":
+        app_dirs.extend([Path("/System/Applications"), Path("/System/Volumes/Data/Applications")])
+    # Some builds ship per-user under ~/Library/Application Support/<Name>/.
+    for n in names:
+        app_dirs.append(Path.home() / "Library/Application Support" / n)
+    for base in app_dirs:
+        for n in [bundle, *names]:
+            out.append(base / f"{n}.app/Contents/MacOS/{exe}")
+            out.append(base / f"{n}.app/Contents/MacOS/{n}")
+    return out
 
 
 def find_client_executables(edition: str) -> List[str]:
@@ -225,6 +280,8 @@ def find_client_executables(edition: str) -> List[str]:
         names = list(EDITION_DEFS[key]["process_names"])
 
     candidates: List[Path] = []
+    if platform.system() == "Darwin":
+        candidates.extend(_macos_app_candidates(key))
     if platform.system() == "Windows":
         bases = [
             Path("E:/WorkBuddyAI"),
@@ -269,12 +326,19 @@ def find_client_executables(edition: str) -> List[str]:
 
     found: List[str] = []
     seen: Set[str] = set()
+    resolved: Set[str] = set()
     for p in candidates:
         s = str(p)
         if s in seen:
             continue
         seen.add(s)
         try:
+            # Resolve so symlinked bundle locations (/Applications vs
+            # /System/Volumes/Data/Applications on macOS) collapse to one entry.
+            real = str(p.resolve())
+            if real in resolved:
+                continue
+            resolved.add(real)
             if p.exists() and p.is_file():
                 found.append(s)
         except OSError:

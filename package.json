@@ -6,11 +6,18 @@
     "tauri": "tauri",
     "ui:dev": "npm run dev --prefix ui",
     "ui:build": "npm run build --prefix ui && node scripts/copy-ui-dist.mjs",
-    "dev:desktop": "powershell -ExecutionPolicy Bypass -File scripts/dev_desktop.ps1",
+    "dev:desktop:win": "powershell -ExecutionPolicy Bypass -File scripts/dev_desktop.ps1",
+    "dev:desktop:mac": "bash scripts/dev_desktop.sh",
+    "dev:desktop": "node scripts/dev_desktop.js",
     "build:desktop": "tauri build --no-bundle",
     "build:desktop:installer": "tauri build",
-    "build:portable": "powershell -ExecutionPolicy Bypass -File scripts/build_portable.ps1",
-    "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build_sidecar.ps1"
+    "build:portable:win": "powershell -ExecutionPolicy Bypass -File scripts/build_portable.ps1",
+    "build:portable:mac": "bash scripts/build_portable.sh",
+    "build:portable": "node scripts/build_portable.js",
+    "build:sidecar:win": "powershell -ExecutionPolicy Bypass -File scripts/build_sidecar.ps1",
+    "build:sidecar:mac": "bash scripts/build_sidecar.sh",
+    "build:sidecar": "node scripts/build_sidecar.js",
+    "icons:mac": "python3 scripts/make_icns.py"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"

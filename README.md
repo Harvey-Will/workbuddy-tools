@@ -18,7 +18,7 @@ WorkBuddy Tools 是一款面向 **WorkBuddy / WorkBuddyAI** 的本地账号与�
 
 **功能**：多账号管理 · 快速切换 · 数据迁移 · 会话与记忆 · Skills / MCP · Token 用量统计 · 本地优先
 
-**平台**：Windows
+**平台**：Windows · macOS（Apple Silicon / Intel）
 
 ---
 
@@ -86,15 +86,15 @@ WorkBuddy Tools 是一款面向 **WorkBuddy / WorkBuddyAI** 的本地账号与�
 
 ## 下载
 
-推荐直接使用 Windows 便携版。
-
 前往 [Releases](https://github.com/Harvey-Will/workbuddy-tools/releases) 下载最新的：
 
-```text
-WorkBuddyTools-portable-win64-*.zip
-```
+- Windows 便携版：`WorkBuddyTools-portable-win64-*.zip`，解压后运行 `workbuddy-tools.exe`
+- macOS 便携版：`WorkBuddyTools-portable-macOS-*.zip`，解压后把 `WorkBuddyTools-portable-macOS` 拖入「应用程序」
 
-解压后运行 `workbuddy-tools.exe` 即可使用，无需安装 Python、Node.js 或 Rust。
+两个版本都内置完整运行时，无需安装 Python、Node.js 或 Rust。
+
+> [!NOTE]
+> macOS 版未经过 Apple 公证（notarization）。首次打开需要：右键点击应用 →「打开」，或在「系统设置 → 隐私与安全性」中点击「仍要打开」。这是社区分发应用的正常提示，不代表应用被修改过。
 
 ---
 
@@ -159,20 +159,38 @@ WorkBuddy Tools 只在需要时读取或修改这些本地文件，并将自己�
 ```bash
 npm install
 cd ui && npm install && cd ..
-npm run dev:desktop
+npm run dev:desktop      # 自动识别 Windows / macOS
 ```
 
 ### 构建
 
-```powershell
+`npm run build:sidecar` 与 `npm run build:portable` 会自动选择当前平台的脚本，
+也可以显式指定：
+
+```bash
+# Windows
 powershell -File scripts/build_sidecar.ps1
-npm run build:portable
+powershell -File scripts/build_portable.ps1
+
+# macOS
+bash scripts/build_sidecar.sh
+bash scripts/build_portable.sh
+```
+
+macOS 首次构建前如需重新生成应用图标：
+
+```bash
+python3 scripts/make_icns.py     # 依赖 Pillow，输出 src-tauri/icons/icon.icns
 ```
 
 ### 测试
 
-```powershell
+```bash
+# Windows
 .venv\Scripts\python -m unittest discover -s tests
+
+# macOS / Linux
+./.venv/bin/python -m unittest discover -s tests
 ```
 
 ### 技术栈

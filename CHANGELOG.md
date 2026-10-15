@@ -4,6 +4,39 @@
 
 ---
 
+## [Unreleased] - macOS 支持
+
+### 🍎 新增：原生 macOS 支持
+- **构建产物升级为跨平台**：`bundle.targets` 增加 `app` / `dmg`，可直接产出 `WorkBuddy Tools.app` 与 DMG 安装包，最低支持 macOS 11.0。
+- **新增 `scripts/build_sidecar.sh`**：macOS 版 Python sidecar 构建脚本（PyInstaller onefile + 对应 target triple 命名），与原有 PowerShell 脚本等价。
+- **新增 `scripts/build_portable.sh` / `scripts/dev_desktop.sh`**：macOS 便携打包与本地开发脚本。
+- **新增平台派发器**：`npm run build:sidecar` / `build:portable` / `dev:desktop` 现在会自动选择当前平台的实现，亦可显式使用 `:win` / `:mac` 后缀。
+- **新增 `scripts/make_icns.py`**：从品牌图形生成 `icon.icns`（仓库原本只有最大 256px 的 PNG，不足 macOS iconset 的 1024px 需求）。
+
+### 🔧 修复：macOS 下的客户端识别
+- **`find_client_executables()` 支持 .app bundle**：macOS 客户端为 Electron 应用，真实可执行文件名为 `Electron`（位于 `WorkBuddy.app/Contents/MacOS/`）。此前非 Windows 分支只在 `/usr/bin` 等目录查找，必然落空；现在会扫描 `/Applications`、`~/Applications` 等常见位置。
+- **`client_looks_running()` 改为精确匹配**：原先使用 `pgrep -f <名称>`，会匹配到任何命令行里"提到"该名称的进程（编辑器、grep、甚至本工具自身），在 macOS/Linux 上误报率较高。现改为 `pgrep -x` 精确进程名匹配，并针对 Electron bundle 追加 `.app/Contents/MacOS` 路径匹配。
+- **路径去重**：`/Applications` 与 `/System/Volumes/Data/Applications` 在 macOS 上指向同一位置，现在会去重避免重复展示。
+
+### 🔧 修复：桌面外壳的跨平台化
+- **内嵌 sidecar 按目标平台编译**：`include_bytes!` 原先仅针对 `x86_64-pc-windows-msvc`，现按 `target_os` + `target_arch` 分支覆盖 Windows / macOS / Linux 各目标三元组。
+- **提取的 sidecar 自动补可执行权限**：非 Windows 平台提取后补 `0o755`，否则 `exec` 会以 `EACCES` 失败。
+- **提取目录按用户隔离**：临时目录路径加入 `$USER`，避免多用户共用同一台机器时互相覆盖。
+- **sidecar 查找目录扩展**：除可执行文件同级目录外，macOS 上还会查找 `Contents/`、`Contents/Resources`、`Contents/MacOS`。
+- **`windows_subsystem` 属性限定到 Windows**：避免非 Windows 目标下的无谓属性。
+
+### 🔒 安全
+- **熵源升级**：非 Windows 平台的 token 生成改用 `/dev/urandom`（CSPRNG），原先使用时间戳派生的伪随机序列，仅作为最后的兜底保留。
+
+### 🤖 CI
+- **构建矩阵扩展**：Python 单测、前端构建、Rust cargo check 三项任务均在 `windows-latest` 与 `macos-latest` 上运行。
+- **新增 macOS 打包任务**：产出 `.app` bundle 并上传为构建产物。
+
+### 📝 说明
+- Python 核心逻辑（账号扫描、会话解析、迁移、Token 统计、备份恢复）本身即为跨平台实现，本次未做改动；77 项单元测试在 macOS 上全部通过。
+
+---
+
 ## [v0.1.5.1] - 2026-09-21
 
 ### 💡 核心更新与体验优化
