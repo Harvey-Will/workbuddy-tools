@@ -214,32 +214,111 @@ def client_looks_running(edition: str) -> bool:
     if not pgrep:
         return False
     for name in names:
-        # Exact process-name match only. "-f name" matches any command line that
-        # merely *mentions* the word (editors, greps, this tool's own UI), which
-        # would produce false "client running" blocks on macOS/Linux.
-        for args in ([pgrep, "-x", name], [pgrep, "-xi", f"{name}.app"]):
-            try:
-                r = subprocess.run(args, capture_output=True, text=True)
-                if r.returncode == 0 and r.stdout.strip():
-                    return True
-            except Exception:
-                continue
-        # macOS Electron bundles: the Mach-O entry point is "Electron"
-        # regardless of app name, so match the .app bundle path itself. The
-        # pattern must include "/Contents/MacOS" and the app name so unrelated
-        # system agents (loginwindow, WindowManager, ...) never match.
-        if platform.system() == "Darwin":
-            try:
-                r = subprocess.run(
-                    [pgrep, "-f", f".app/Contents/MacOS/.*{re.escape(name)}"],
-                    capture_output=True,
-                    text=True,
-                )
-                if r.returncode == 0 and r.stdout.strip():
-                    return True
-            except Exception:
-                continue
+        if _pgrep_matches(pgrep, ["-x", name]):
+            return True
+        for line in _pgrep_lines(pgrep, name):
+            if _looks_like_client_process(line, name):
+                return True
     return False
+
+
+def _pgrep_lines(pgrep: str, pattern: str) -> List[str]:
+    """Return full command lines matching a pattern.
+
+    pgrep without -l prints only PIDs on macOS, and the PID alone can never be
+    classified, so -l is required. Output is "PID <space> command line".
+    """
+    try:
+        r = subprocess.run([pgrep, "-lf", pattern], capture_output=True, text=True)
+        if r.returncode != 0:
+            return []
+    except Exception:
+        return []
+    out: List[str] = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Strip the leading "PID " field; the rest is the command line.
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            out.append(parts[1])
+    return out
+
+
+def _pgrep_matches(pgrep: str, args: list) -> bool:
+    try:
+        r = subprocess.run([pgrep, *args], capture_output=True, text=True)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+# Sub-commands that keep a bundle's binary alive without the user running the
+# app: Electron helper processes, the crashpad handler, sandbox workers, and
+# the CLI's warm-pool worker. Matched as whole argv tokens / path segments so a
+# username or directory that merely contains the word cannot mislead us.
+_NOT_A_RUNNING_CLIENT_ARGS = (
+    "--prewarm",
+    "--type=",
+    "--stdio",
+    "--no-rate-limit",
+)
+
+_NOT_A_RUNNING_CLIENT_PATH_SEGMENTS = (
+    "/frameworks/",
+    "/helpers/",
+    "/resources/app.asar.unpacked/",
+    "/vendor/sandbox/",
+    "/cli/bin/",
+)
+
+# Our own app must never be mistaken for the client it manages.
+_SELF_MARKERS = ("workbuddy-tools", "workbuddy tools.app", "workbuddy_tools")
+
+
+def _looks_like_client_process(cmdline: str, name: str) -> bool:
+    """Decide whether one pgrep -f match is the client's main UI process.
+
+    pgrep -f matches any argv containing the name, which on macOS wrongly
+    includes: this tool's own window, Electron GPU/renderer helpers, the
+    crashpad handler, sandbox workers, and WorkBuddy's prewarmed CLI pool.
+    None of those mean the user is actively running the client, so blocking
+    backup/migration on them is wrong.
+
+    A real client process looks like:
+        /Applications/WorkBuddy.app/Contents/MacOS/Electron
+    i.e. the bundle's main executable with no sub-command appended.
+    """
+    low = cmdline.lower()
+    if any(marker in low for marker in _SELF_MARKERS):
+        return False
+    if any(arg in low for arg in _NOT_A_RUNNING_CLIENT_ARGS):
+        return False
+    if any(seg in low for seg in _NOT_A_RUNNING_CLIENT_PATH_SEGMENTS):
+        return False
+    if ".app/contents/macos/" not in low:
+        return False
+    if name.lower() not in low:
+        return False
+    # The main UI process is launched without extra argv; anything with a
+    # trailing sub-command is a child worker, not the app itself.
+    return _is_bare_bundle_executable(cmdline)
+
+
+def _is_bare_bundle_executable(cmdline: str) -> bool:
+    """True when argv is only one path pointing at some .app/Contents/MacOS/X."""
+    argv = cmdline.split()
+    if len(argv) != 1:
+        return False
+    exe = argv[0].lower()
+    marker = ".app/contents/macos/"
+    idx = exe.find(marker)
+    if idx < 0:
+        return False
+    # Nothing after the executable name: ".../Contents/MacOS/Electron"
+    tail = exe[idx + len(marker):]
+    return bool(tail) and "/" not in tail
 
 
 def _macos_app_candidates(edition: str) -> List[Path]:

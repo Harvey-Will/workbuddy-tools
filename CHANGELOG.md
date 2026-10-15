@@ -15,7 +15,12 @@
 
 ### 🔧 修复：macOS 下的客户端识别
 - **`find_client_executables()` 支持 .app bundle**：macOS 客户端为 Electron 应用，真实可执行文件名为 `Electron`（位于 `WorkBuddy.app/Contents/MacOS/`）。此前非 Windows 分支只在 `/usr/bin` 等目录查找，必然落空；现在会扫描 `/Applications`、`~/Applications` 等常见位置。
-- **`client_looks_running()` 改为精确匹配**：原先使用 `pgrep -f <名称>`，会匹配到任何命令行里"提到"该名称的进程（编辑器、grep、甚至本工具自身），在 macOS/Linux 上误报率较高。现改为 `pgrep -x` 精确进程名匹配，并针对 Electron bundle 追加 `.app/Contents/MacOS` 路径匹配。
+- **`client_looks_running()` 按进程身份精确判定**：原先使用 `pgrep -f <名称>`，会匹配到任何命令行里"提到"该名称的进程，在 macOS 上导致**已退出客户端后仍提示"客户端正在运行，无法备份/迁移"**。具体误报来源有三类，现均被正确排除：
+  - 本工具自身的窗口（`WorkBuddy Tools.app/...` 路径含 `WorkBuddy`）
+  - Electron 的 helper 进程（GPU / Renderer / `chrome_crashpad_handler`）、sandbox 工作进程、daemon 子进程
+  - 客户端退出后仍常驻的 CLI 预热进程（`codebuddy --prewarm`）
+  
+  现在只有「bundle 主可执行文件、且未附加任何子命令参数」的进程才算客户端在运行（例如 `/Applications/WorkBuddy.app/Contents/MacOS/Electron`），并改用 `pgrep -lf` 获取完整命令行以便判定。新增 `tests/test_client_detection.py` 固化这 6 组真实进程样本。
 - **路径去重**：`/Applications` 与 `/System/Volumes/Data/Applications` 在 macOS 上指向同一位置，现在会去重避免重复展示。
 
 ### 🔧 修复：桌面外壳的跨平台化
