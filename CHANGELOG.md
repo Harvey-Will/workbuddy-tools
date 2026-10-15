@@ -23,6 +23,12 @@
   现在只有「bundle 主可执行文件、且未附加任何子命令参数」的进程才算客户端在运行（例如 `/Applications/WorkBuddy.app/Contents/MacOS/Electron`），并改用 `pgrep -lf` 获取完整命令行以便判定。新增 `tests/test_client_detection.py` 固化这 6 组真实进程样本。
 - **路径去重**：`/Applications` 与 `/System/Volumes/Data/Applications` 在 macOS 上指向同一位置，现在会去重避免重复展示。
 
+### 🎨 修复：提示信息被弹窗遮挡
+- **Toast 层级提升**：`.toast` 原本 `z-index: 50`，而 `.modal-backdrop` 为 `z-index: 100` 且带有 `backdrop-filter: blur(4px)` 与半透明深色背景。结果任何在弹窗打开时触发的提示（例如点击备份后提示"客户端正在运行"）都被压在遮罩下方，文字被模糊化后完全无法阅读。现将层级提升至 `z-index: 300`。
+- **弹窗打开时 Toast 改到顶部居中**：原来固定在右下角，在弹窗覆盖屏幕时容易处于对话框后方被忽视。现在由 `toast()` 检测 `.modal-backdrop:not(.hidden)` 并切换 `toast--modal` 类，将提示移到顶部居中。使用 JS 判断而非 CSS `:has()` 选择器，以保证 macOS 11 上较旧的 WKWebView 行为一致。
+- **显示时长自适应**：按消息长度在 2.8s～6s 之间调整，长文案（如完整的错误说明）不会一闪而过。
+- **可读性细节**：补充 `line-height`、`word-break`，为 toast 加入淡入动画与 `aria-live="polite"` 无障碍标注。
+
 ### 🔧 修复：桌面外壳的跨平台化
 - **内嵌 sidecar 按目标平台编译**：`include_bytes!` 原先仅针对 `x86_64-pc-windows-msvc`，现按 `target_os` + `target_arch` 分支覆盖 Windows / macOS / Linux 各目标三元组。
 - **提取的 sidecar 自动补可执行权限**：非 Windows 平台提取后补 `0o755`，否则 `exec` 会以 `EACCES` 失败。

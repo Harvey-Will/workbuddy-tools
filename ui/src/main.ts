@@ -138,14 +138,26 @@ function toast(msg: string): void {
     el = document.createElement("div");
     el.id = "toast";
     el.className = "toast";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
     document.body.appendChild(el);
   }
   el.textContent = msg;
+
+  // A modal's backdrop is translucent and blurred, so a bottom-right toast
+  // would sit underneath it and read as mush. Park the toast at the top while
+  // any modal is open. Done in JS rather than CSS :has() so older WKWebView
+  // (macOS 11) behaves the same.
+  const modalOpen = !!document.querySelector(".modal-backdrop:not(.hidden)");
+  el.classList.toggle("toast--modal", modalOpen);
+
   el.classList.remove("hidden");
   window.clearTimeout((toast as unknown as { t?: number }).t);
+  // Longer messages need longer to read.
+  const ms = Math.min(6000, Math.max(2800, msg.length * 110));
   (toast as unknown as { t?: number }).t = window.setTimeout(() => {
     el?.classList.add("hidden");
-  }, 2800);
+  }, ms);
 }
 
 function safeColor(c: string): string {
