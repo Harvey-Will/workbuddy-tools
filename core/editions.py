@@ -4,10 +4,11 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Set
+from typing import List, Optional, Set
 
 from .models import EditionInfo
 
@@ -57,6 +58,51 @@ def normalize_edition(edition: str) -> str:
     if key not in EDITION_DEFS:
         raise ValueError(f"unknown edition: {edition}")
     return key
+
+
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """Open a database for reading without ever needing to write.
+
+    A plain sqlite3.connect() opens read-write, and SQLite then wants to create
+    a journal/WAL file next to the database. On macOS that directory is often
+    not writable by us (TCC-protected home, or a client that owns it), so even
+    a pure read fails with "unable to open database file" and the whole
+    migration aborts. Windows does not have this problem, which is why it went
+    unnoticed.
+
+    Order of attempts:
+      mode=ro      - read-only; still wants a journal, so it fails on a
+                     directory we cannot write to
+      immutable=1  - assumes the file never changes; skips all locking and
+                     journal machinery, so it works on a read-only directory
+      plain        - last resort for filesystems that reject both URIs
+    """
+    if not db_path.exists():
+        raise FileNotFoundError(str(db_path))
+
+    posix = db_path.resolve().as_posix()
+    last_err: Optional[Exception] = None
+    for uri in (f"file:{posix}?mode=ro", f"file:{posix}?mode=ro&immutable=1"):
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            # Force a real read so a broken URI fails here, not later.
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            return conn
+        except sqlite3.Error as e:
+            last_err = e
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return conn
+    except sqlite3.Error as e:
+        # Surface the most informative error we saw, not this last attempt.
+        raise last_err if last_err is not None else e
 
 
 def data_home() -> Path:

@@ -23,6 +23,16 @@
   现在只有「bundle 主可执行文件、且未附加任何子命令参数」的进程才算客户端在运行（例如 `/Applications/WorkBuddy.app/Contents/MacOS/Electron`），并改用 `pgrep -lf` 获取完整命令行以便判定。新增 `tests/test_client_detection.py` 固化这 6 组真实进程样本。
 - **路径去重**：`/Applications` 与 `/System/Volumes/Data/Applications` 在 macOS 上指向同一位置，现在会去重避免重复展示。
 
+### 🗄 修复：迁移/备份在 macOS 上静默失败（数据库打不开）
+- **新增 `editions.connect_readonly()` 并统一所有只读用途**：原先代码用 `sqlite3.connect(路径)` 打开 WorkBuddy 数据库。该调用是惰性的，`connect()` 本身不报错，等第一次真正查询时 SQLite 需要创建 journal/WAL 文件；若数据目录不可写（macOS TCC 受保护的家目录、或客户端自持的目录），即以 `unable to open database file` 失败。
+
+  更糟的是多处调用点用 `except sqlite3.Error: return []` 静默吞掉异常，于是表现为**「点击迁移无效」而没有任何错误提示**。实际影响：
+  - 账号列表 sessions 统计为 0（真实为 421）
+  - 迁移计划 sessions / session_content / tasks / session_usage 全部为 0
+  - `validate_minimum_schema` 直接抛错中断迁移流程
+
+  `connect_readonly()` 依次尝试 mode=ro → mode=ro&immutable=1 → 普通连接，并在函数内部立即执行一次真实读取，把失败点前移到连接阶段。已应用到 accounts.py / migrate.py / sessions.py 中全部只读场景（源库读取、schema 校验、会话与用量查询、SQLite 快照）。目标库（写入侧）仍保持普通连接。新增 `tests/test_readonly_db.py` 固化该契约。
+
 ### 🎨 修复：提示信息被弹窗遮挡
 - **Toast 层级提升**：`.toast` 原本 `z-index: 50`，而 `.modal-backdrop` 为 `z-index: 100` 且带有 `backdrop-filter: blur(4px)` 与半透明深色背景。结果任何在弹窗打开时触发的提示（例如点击备份后提示"客户端正在运行"）都被压在遮罩下方，文字被模糊化后完全无法阅读。现将层级提升至 `z-index: 300`。
 - **弹窗打开时 Toast 改到顶部居中**：原来固定在右下角，在弹窗覆盖屏幕时容易处于对话框后方被忽视。现在由 `toast()` 检测 `.modal-backdrop:not(.hidden)` 并切换 `toast--modal` 类，将提示移到顶部居中。使用 JS 判断而非 CSS `:has()` 选择器，以保证 macOS 11 上较旧的 WKWebView 行为一致。
