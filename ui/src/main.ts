@@ -75,6 +75,7 @@ const state = {
   backupsEdition: "domestic",
   backups: [] as BackupItem[],
   pendingRestoreBackup: null as BackupItem | null,
+  confirmResolve: null as ((ok: boolean) => void) | null,
   currentBackupAccount: null as { uid: string; name: string } | null,
   isCheckingUpdate: false,
   latestUpdate: null as UpdateCheckResult | null,
@@ -644,6 +645,23 @@ function renderShell(): void {
       <div class="modal-footer">
         <button id="btn-cancel-restore" class="btn">取消</button>
         <button id="btn-do-restore" class="btn danger" disabled>确认执行还原</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generic Confirm Modal (replaces window.confirm, which WKWebView never renders) -->
+  <div id="confirm-modal" class="modal-backdrop hidden">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <span>❓</span>
+        <h3 id="confirm-modal-title">确认操作</h3>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-modal-message" style="margin:0"></p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-confirm-cancel" class="btn">取消</button>
+        <button id="btn-confirm-ok" class="btn primary">确认</button>
       </div>
     </div>
   </div>
@@ -1543,7 +1561,7 @@ function renderAccounts(): void {
   root.querySelectorAll<HTMLElement>("[data-switch]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const uid = btn.dataset.switch!;
-      if (!confirm(`切换到「${btn.dataset.name}」？切换后请重启客户端。`)) return;
+      if (!(await confirmAction(`切换到「${btn.dataset.name}」？切换后请重启客户端。`, "确认切换账号", "切换"))) return;
       try {
         const r = await api.switchAccount(state.edition, uid);
         toast(r.message || "已切换");
@@ -1555,7 +1573,7 @@ function renderAccounts(): void {
   });
   root.querySelectorAll<HTMLElement>("[data-rename]").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      const next = prompt("显示名称", btn.dataset.name || "");
+      const next = window.prompt("显示名称", btn.dataset.name || "");
       if (next === null) return;
       try {
         await api.rename(state.edition, btn.dataset.rename!, next.trim());
@@ -2031,9 +2049,48 @@ function startJobPolling(jobId: string): void {
   void poll();
 }
 
+async function confirmAction(message: string, title = "确认操作", okLabel = "确认"): Promise<boolean> {
+  const modal = document.getElementById("confirm-modal");
+  const msgEl = document.getElementById("confirm-modal-message");
+  const titleEl = document.getElementById("confirm-modal-title");
+  const okBtn = document.getElementById("btn-confirm-ok") as HTMLButtonElement | null;
+  if (!modal || !msgEl || !titleEl || !okBtn) return window.confirm(message);
+
+  // Resolve any previously unanswered prompt so a stale promise cannot hang forever.
+  if (state.confirmResolve) {
+    const prev = state.confirmResolve;
+    state.confirmResolve = null;
+    prev(false);
+  }
+
+  titleEl.textContent = title;
+  msgEl.textContent = message;
+  okBtn.textContent = okLabel;
+  modal.classList.remove("hidden");
+
+  return new Promise<boolean>((resolve) => {
+    state.confirmResolve = resolve;
+  });
+}
+
+function settleConfirm(ok: boolean): void {
+  const modal = document.getElementById("confirm-modal");
+  if (modal) modal.classList.add("hidden");
+  const resolve = state.confirmResolve;
+  state.confirmResolve = null;
+  if (resolve) resolve(ok);
+}
+
 async function runMigrate(): Promise<void> {
-  if (!state.migratePlan) return;
-  if (!confirm("确认执行迁移？系统将在迁移前自动创建完整一致性快照。")) return;
+  if (!state.migratePlan) {
+    toast("请先点击「刷新」检测迁移计划");
+    return;
+  }
+  if (!(await confirmAction(
+    "确认执行迁移？系统将在迁移前自动创建完整一致性快照。",
+    "确认执行迁移",
+    "确认执行"
+  ))) return;
   ($("#btn-run") as HTMLButtonElement).disabled = true;
 
   try {
@@ -3231,6 +3288,22 @@ function bind(): void {
     bkEdSelect.addEventListener("change", async (e) => {
       state.backupsEdition = (e.target as HTMLSelectElement).value;
       await loadBackups();
+    });
+  }
+
+  // Generic Confirm Modal (WKWebView never renders window.confirm)
+  const confirmOkBtn = document.getElementById("btn-confirm-ok");
+  const confirmCancelBtn = document.getElementById("btn-confirm-cancel");
+  if (confirmOkBtn) {
+    confirmOkBtn.addEventListener("click", () => settleConfirm(true));
+  }
+  if (confirmCancelBtn) {
+    confirmCancelBtn.addEventListener("click", () => settleConfirm(false));
+  }
+  const confirmModal = document.getElementById("confirm-modal");
+  if (confirmModal) {
+    confirmModal.addEventListener("click", (e) => {
+      if (e.target === confirmModal) settleConfirm(false);
     });
   }
 
