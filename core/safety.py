@@ -59,10 +59,10 @@ class BackupCorrupted(SafetyError):
 class DataDirNotWritable(SafetyError):
     """The app may read the WorkBuddy data directory but cannot write to it.
 
-    On macOS this is the normal consequence of TCC: a data directory under a
-    protected location needs Full Disk Access before anything can be created
-    inside it. Reporting it as a generic 500 leaves the user staring at a dead
-    button, so give it its own code and a message that says what to do.
+    On a normal Mac the data directory under the user's home is not TCC-
+    protected, so this is usually a plain permission/ownership issue. We still
+    surface it as its own code with an actionable message instead of a generic
+    500, which would otherwise leave the user staring at a dead button.
     """
 
     code = "data_dir_not_writable"

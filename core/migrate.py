@@ -50,16 +50,19 @@ SESSION_SCOPED_ITEMS = {
 def _write_hint(data_root: Path, err: OSError) -> str:
     """Turn an OS write failure into a message the user can act on.
 
-    macOS TCC is the usual cause: the WorkBuddy data directory sits under a
-    protected location, so the app can read it but not create anything inside
-    it until Full Disk Access is granted.
+    On a normal Mac the WorkBuddy data directory under the user's home
+    (~/.workbuddy / ~/.workbuddy-ai) is not TCC-protected, so a write failure
+    is almost always a plain permission/ownership issue (e.g. the directory is
+    owned by the WorkBuddy client, or a security tool blocks the write). We
+    describe the likely fixes without asserting TCC is to blame.
     """
     if sys.platform == "darwin":
         return (
             f"无法写入 {data_root}（{err.strerror or '权限不足'}）。"
-            "macOS 的隐私保护会阻止应用在此位置创建文件。"
-            "请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中允许本应用，"
-            "然后重新打开它再试。"
+            "请先确认该目录归当前用户所有且可写"
+            "（在访达中右键「显示简介」→ 共享与权限）。"
+            "若确认权限无误仍被拒绝，可在「系统设置 → 隐私与安全性 → "
+            "完全磁盘访问权限」中允许本应用后重试。"
         )
     return (
         f"无法写入 {data_root}（{err.strerror or '权限不足'}）。"
