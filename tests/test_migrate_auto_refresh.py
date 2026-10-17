@@ -10,9 +10,9 @@ from tests.test_migration_safety import SafetyCase, UID_A, UID_B
 
 class TestMigrateAutoRefresh(SafetyCase):
     def test_version_bump(self):
-        self.assertEqual(APP_VERSION, "0.1.5.1")
+        self.assertEqual(APP_VERSION, "0.1.5.2")
         sys_ver = api_system_version()
-        self.assertEqual(sys_ver["version"], "0.1.5.1")
+        self.assertEqual(sys_ver["version"], "0.1.5.2")
 
     def test_client_running_blocks_and_unblocks(self):
         self.same_edition()

@@ -13,16 +13,27 @@ if (-not (Test-Path $sidecarSrc)) {
   powershell -ExecutionPolicy Bypass -File (Join-Path $root "scripts\build_sidecar.ps1")
 }
 
-$env:RUSTUP_HOME = Join-Path $root ".toolchain\rustup"
-$env:CARGO_HOME = Join-Path $root ".toolchain\cargo"
-$env:PATH = "$(Join-Path $env:CARGO_HOME 'bin');$env:PATH"
+if (Test-Path (Join-Path $root ".toolchain")) {
+  $env:RUSTUP_HOME = Join-Path $root ".toolchain\rustup"
+  $env:CARGO_HOME = Join-Path $root ".toolchain\cargo"
+  $env:PATH = "$(Join-Path $env:CARGO_HOME 'bin');$env:PATH"
+}
 
 $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-$vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+$vcvars = $null
+if (Test-Path $vswhere) {
+  $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+  if ($vs) {
+    $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
+  }
+}
 
 # Compile release + UI embed (no NSIS)
-cmd /c "`"$vcvars`" && cd /d `"$root`" && npx tauri build --no-bundle"
+if ($vcvars -and (Test-Path $vcvars)) {
+  cmd /c "`"$vcvars`" && cd /d `"$root`" && npx tauri build --no-bundle"
+} else {
+  cmd /c "cd /d `"$root`" && npx tauri build --no-bundle"
+}
 if ($LASTEXITCODE -ne 0) { throw "tauri build --no-bundle failed" }
 
 $portable = Join-Path $root "release\WorkBuddyTools-portable"
@@ -30,6 +41,7 @@ if (Test-Path $portable) { Remove-Item $portable -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $portable | Out-Null
 
 Copy-Item (Join-Path $root "src-tauri\target\release\workbuddy-tools.exe") $portable -Force
+Copy-Item (Join-Path $root "src-tauri\target\release\workbuddy-tools.exe") (Join-Path $root "release\workbuddy-tools.exe") -Force
 # sidecar is embedded; do not ship a second exe
 
 # zip

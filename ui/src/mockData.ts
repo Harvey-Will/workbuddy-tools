@@ -820,11 +820,11 @@ class MockStore {
     error: null;
   } {
     return {
-      current_version: "0.1.5.1",
-      latest_version: "0.1.5.1",
+      current_version: "0.1.5.2",
+      latest_version: "0.1.5.2",
       has_update: false,
-      release_name: "v0.1.5.1 正式版",
-      release_notes: "🎉 当前为最新正式版。\n- 迁移配置体验全面优化：更改账号与版本即时自动刷新检测\n- 重新检测 WorkBuddy 运行状态，关闭客户端后即刻进入就绪模式\n- 细化迁移就绪与锁定状态流转体验",
+      release_name: "v0.1.5.2 正式版",
+      release_notes: "🎉 当前为最新正式版。\n- 原生支持 macOS (Apple Silicon / Intel)，打通跨平台编译与 DMG 打包\n- 修复 WebKit 下 confirm 对话框静默失效导致的按钮无响应\n- 修复退出客户端后仍误报运行中的进程检测死锁\n- 引入云端 GitHub Actions 自动化跨平台发版工作流",
       published_at: new Date().toISOString(),
       html_url: "https://github.com/Harvey-Will/workbuddy-tools/releases",
       download_url: "https://github.com/Harvey-Will/workbuddy-tools/releases/latest",

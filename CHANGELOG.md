@@ -4,9 +4,10 @@
 
 ---
 
-## [Unreleased] - macOS 支持
+## [v0.1.5.2] - 2026-10-17
 
-### 🍎 新增：原生 macOS 支持
+### 🍎 新增：原生 macOS 支持与全自动跨平台 CI/CD
+- **全自动跨平台云端发布**：新增 `.github/workflows/release.yml`，打 Tag 即全自动在 GitHub Actions 云端并行编译 Windows 便携版与 macOS DMG/APP 安装包并发布 Release。
 - **构建产物升级为跨平台**：`bundle.targets` 增加 `app` / `dmg`，可直接产出 `WorkBuddy Tools.app` 与 DMG 安装包，最低支持 macOS 11.0。
 - **新增 `scripts/build_sidecar.sh`**：macOS 版 Python sidecar 构建脚本（PyInstaller onefile + 对应 target triple 命名），与原有 PowerShell 脚本等价。
 - **新增 `scripts/build_portable.sh` / `scripts/dev_desktop.sh`**：macOS 便携打包与本地开发脚本。
