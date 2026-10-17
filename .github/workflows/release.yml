@@ -154,11 +154,16 @@ jobs:
           echo "=== Release Assets & Checksums ==="
           cat SHA256SUMS.txt
 
+      - name: Extract Release Notes from CHANGELOG
+        run: |
+          python scripts/extract_changelog.py "${{ env.TAG }}"
+
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.TAG }}
           tag_name: ${{ env.TAG }}
+          body_path: release_notes.md
           generate_release_notes: true
           files: |
             dist-release/*
