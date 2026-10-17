@@ -82,8 +82,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install UI dependencies
-        run: npm ci --prefix ui
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix ui
       - name: Build sidecar (PyInstaller)
         run: bash scripts/build_sidecar.sh
       - name: Build UI
