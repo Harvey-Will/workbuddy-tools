@@ -6,64 +6,15 @@
 
 ## [v0.1.5.2] - 2026-10-17
 
-### 🍎 新增：原生 macOS 支持与全自动跨平台 CI/CD
-- **全自动跨平台云端发布**：新增 `.github/workflows/release.yml`，打 Tag 即全自动在 GitHub Actions 云端并行编译 Windows 便携版与 macOS DMG/APP 安装包并发布 Release。
-- **构建产物升级为跨平台**：`bundle.targets` 增加 `app` / `dmg`，可直接产出 `WorkBuddy Tools.app` 与 DMG 安装包，最低支持 macOS 11.0。
-- **新增 `scripts/build_sidecar.sh`**：macOS 版 Python sidecar 构建脚本（PyInstaller onefile + 对应 target triple 命名），与原有 PowerShell 脚本等价。
-- **新增 `scripts/build_portable.sh` / `scripts/dev_desktop.sh`**：macOS 便携打包与本地开发脚本。
-- **新增平台派发器**：`npm run build:sidecar` / `build:portable` / `dev:desktop` 现在会自动选择当前平台的实现，亦可显式使用 `:win` / `:mac` 后缀。
-- **新增 `scripts/make_icns.py`**：从品牌图形生成 `icon.icns`（仓库原本只有最大 256px 的 PNG，不足 macOS iconset 的 1024px 需求）。
+### 🍎 原生支持 macOS
+- **全架构支持**：正式原生支持 macOS（包括 Apple Silicon M 系列芯片与 Intel 架构芯片），提供专属 `.dmg` 一键安装镜像与原生桌面体验。
+- **全自动跨平台发布**：打通 GitHub 云端自动化双端构建流水线，后续版本 Windows 与 macOS 将保持同步发布。
 
-### 🔧 修复：macOS 下的客户端识别
-- **`find_client_executables()` 支持 .app bundle**：macOS 客户端为 Electron 应用，真实可执行文件名为 `Electron`（位于 `WorkBuddy.app/Contents/MacOS/`）。此前非 Windows 分支只在 `/usr/bin` 等目录查找，必然落空；现在会扫描 `/Applications`、`~/Applications` 等常见位置。
-- **`client_looks_running()` 按进程身份精确判定**：原先使用 `pgrep -f <名称>`，会匹配到任何命令行里"提到"该名称的进程，在 macOS 上导致**已退出客户端后仍提示"客户端正在运行，无法备份/迁移"**。具体误报来源有三类，现均被正确排除：
-  - 本工具自身的窗口（`WorkBuddy Tools.app/...` 路径含 `WorkBuddy`）
-  - Electron 的 helper 进程（GPU / Renderer / `chrome_crashpad_handler`）、sandbox 工作进程、daemon 子进程
-  - 客户端退出后仍常驻的 CLI 预热进程（`codebuddy --prewarm`）
-  
-  现在只有「bundle 主可执行文件、且未附加任何子命令参数」的进程才算客户端在运行（例如 `/Applications/WorkBuddy.app/Contents/MacOS/Electron`），并改用 `pgrep -lf` 获取完整命令行以便判定。新增 `tests/test_client_detection.py` 固化这 6 组真实进程样本。
-- **路径去重**：`/Applications` 与 `/System/Volumes/Data/Applications` 在 macOS 上指向同一位置，现在会去重避免重复展示。
-
-### 🗄 修复：迁移/备份在 macOS 上静默失败（数据库打不开）
-- **新增 `editions.connect_readonly()` 并统一所有只读用途**：原先代码用 `sqlite3.connect(路径)` 打开 WorkBuddy 数据库。该调用是惰性的，`connect()` 本身不报错，等第一次真正查询时 SQLite 需要创建 journal/WAL 文件；若数据目录不可写（macOS TCC 受保护的家目录、或客户端自持的目录），即以 `unable to open database file` 失败。
-
-  更糟的是多处调用点用 `except sqlite3.Error: return []` 静默吞掉异常，于是表现为**「点击迁移无效」而没有任何错误提示**。实际影响：
-  - 账号列表 sessions 统计为 0（真实为 421）
-  - 迁移计划 sessions / session_content / tasks / session_usage 全部为 0
-  - `validate_minimum_schema` 直接抛错中断迁移流程
-
-  `connect_readonly()` 依次尝试 mode=ro → mode=ro&immutable=1 → 普通连接，并在函数内部立即执行一次真实读取，把失败点前移到连接阶段。已应用到 accounts.py / migrate.py / sessions.py 中全部只读场景（源库读取、schema 校验、会话与用量查询、SQLite 快照）。目标库（写入侧）仍保持普通连接。新增 `tests/test_readonly_db.py` 固化该契约。
-
-### 🔐 修复：写入数据目录失败时报裸 500，用户看不到原因
-- **新增 `DataDirNotWritable` 异常**：此前 `create_backup()` 里的 `mkdir()` 抛出 `PermissionError`，它既不是 `SafetyError` 子类、也没被 API 层捕获，最终以 `Internal Server Error` 呈现，UI 上只显示「迁移失败: Internal Server Error」，用户完全无法判断该做什么。
-- **新增 `_write_hint()`**：在 macOS 上把 `PermissionError` 转成可执行的中文指引（提示前往「系统设置 → 隐私与安全性 → 完全磁盘访问权限」授权后重试），其他平台则提示检查目录权限。
-- **API 映射为 403**：`_map_safety()` 为 `DataDirNotWritable` 增加 403 分支，错误码 `data_dir_not_writable` 会一路带到前端。
-- **UI 三处错误处理补齐**：迁移启动、创建即时快照、按账号创建快照的 catch 分支都新增该错误码的专门提示，直接展示后端给出的完整指引。
-
-> 说明：在**正常**的 macOS 上，WorkBuddy 的本地数据目录位于用户家目录下（`~/.workbuddy` / `~/.workbuddy-ai`），**并不**属于 TCC 受保护位置，因此"无法写入"几乎总是纯粹的权限/归属问题（例如目录归客户端所有、或某安全软件拦截写入）。只有当上述权限排查都无误仍被拒绝时，才可能需要到「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中授权。该权限只能由用户在系统设置中授予，工具无法代为获取。开发者提示：若在你的环境中被沙箱（如某些 AI 编码助手的受限文件策略）拦截写入，请先在对应工具中放宽该目录的写入权限，再运行本工具。
-
-### 🎨 修复：提示信息被弹窗遮挡
-- **Toast 层级提升**：`.toast` 原本 `z-index: 50`，而 `.modal-backdrop` 为 `z-index: 100` 且带有 `backdrop-filter: blur(4px)` 与半透明深色背景。结果任何在弹窗打开时触发的提示（例如点击备份后提示"客户端正在运行"）都被压在遮罩下方，文字被模糊化后完全无法阅读。现将层级提升至 `z-index: 300`。
-- **弹窗打开时 Toast 改到顶部居中**：原来固定在右下角，在弹窗覆盖屏幕时容易处于对话框后方被忽视。现在由 `toast()` 检测 `.modal-backdrop:not(.hidden)` 并切换 `toast--modal` 类，将提示移到顶部居中。使用 JS 判断而非 CSS `:has()` 选择器，以保证 macOS 11 上较旧的 WKWebView 行为一致。
-- **显示时长自适应**：按消息长度在 2.8s～6s 之间调整，长文案（如完整的错误说明）不会一闪而过。
-- **可读性细节**：补充 `line-height`、`word-break`，为 toast 加入淡入动画与 `aria-live="polite"` 无障碍标注。
-
-### 🔧 修复：桌面外壳的跨平台化
-- **内嵌 sidecar 按目标平台编译**：`include_bytes!` 原先仅针对 `x86_64-pc-windows-msvc`，现按 `target_os` + `target_arch` 分支覆盖 Windows / macOS / Linux 各目标三元组。
-- **提取的 sidecar 自动补可执行权限**：非 Windows 平台提取后补 `0o755`，否则 `exec` 会以 `EACCES` 失败。
-- **提取目录按用户隔离**：临时目录路径加入 `$USER`，避免多用户共用同一台机器时互相覆盖。
-- **sidecar 查找目录扩展**：除可执行文件同级目录外，macOS 上还会查找 `Contents/`、`Contents/Resources`、`Contents/MacOS`。
-- **`windows_subsystem` 属性限定到 Windows**：避免非 Windows 目标下的无谓属性。
-
-### 🔒 安全
-- **熵源升级**：非 Windows 平台的 token 生成改用 `/dev/urandom`（CSPRNG），原先使用时间戳派生的伪随机序列，仅作为最后的兜底保留。
-
-### 🤖 CI
-- **构建矩阵扩展**：Python 单测、前端构建、Rust cargo check 三项任务均在 `windows-latest` 与 `macos-latest` 上运行。
-- **新增 macOS 打包任务**：产出 `.app` bundle 并上传为构建产物。
-
-### 📝 说明
-- Python 核心逻辑（账号扫描、会话解析、迁移、Token 统计、备份恢复）本身即为跨平台实现，本次未做改动；77 项单元测试在 macOS 上全部通过。
+### ⚡ 交互体验与稳定性修复
+- **修复按钮无反应问题**：彻底解决在部分系统环境下点击「执行迁移」或「切换账号」毫无反应的问题，全面改用更优雅的应用内确认弹窗。
+- **修复客户端运行状态误判**：解决完全退出客户端后界面仍提示“客户端正在运行”并锁定的问题，关闭主程序后即可即刻进入迁移就绪模式。
+- **通知提示全面优化**：优化提示消息（Toast）在各类弹窗遮罩下的展示层级与位置，长提示停留时间根据字数自适应延长，不再一闪而过。
+- **更明确的权限与安全指引**：在数据目录权限不足或无法写入时，提供直观清晰的操作修复指引，告别无意义的错误报错。
 
 ---
 
