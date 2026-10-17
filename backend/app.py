@@ -50,7 +50,7 @@ from core.safety import (
     WriteConflict,
 )
 
-APP_VERSION = "0.1.5.1"
+APP_VERSION = "0.1.5.2"
 __version__ = APP_VERSION
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 

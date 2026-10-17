@@ -4,8 +4,15 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $py = Join-Path $root ".venv\Scripts\python.exe"
-if (-not (Test-Path $py)) {
-  python -m venv .venv
+$pyValid = $false
+if (Test-Path $py) {
+  try {
+    & $py -c "pass" 2>$null
+    if ($LASTEXITCODE -eq 0) { $pyValid = $true }
+  } catch {}
+}
+if (-not $pyValid) {
+  python -m venv .venv --clear
   $py = Join-Path $root ".venv\Scripts\python.exe"
 }
 & $py -m pip install -q -r requirements.txt pyinstaller
