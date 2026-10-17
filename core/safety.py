@@ -56,6 +56,18 @@ class BackupCorrupted(SafetyError):
     code = "backup_corrupted"
 
 
+class DataDirNotWritable(SafetyError):
+    """The app may read the WorkBuddy data directory but cannot write to it.
+
+    On a normal Mac the data directory under the user's home is not TCC-
+    protected, so this is usually a plain permission/ownership issue. We still
+    surface it as its own code with an actionable message instead of a generic
+    500, which would otherwise leave the user staring at a dead button.
+    """
+
+    code = "data_dir_not_writable"
+
+
 def validate_uid(raw: Any) -> str:
     uid = "" if raw is None else str(raw).strip()
     if not uid:

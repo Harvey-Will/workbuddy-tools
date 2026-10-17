@@ -218,6 +218,17 @@ fn fill_entropy(buf: &mut [u8]) {
             return;
         }
     }
+    // Unix: /dev/urandom is a CSPRNG and always available on macOS/Linux/BSD.
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(buf).is_ok() {
+                return;
+            }
+        }
+    }
+    // Last resort for platforms where /dev/urandom is unavailable.
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -239,9 +250,40 @@ fn sidecar_hash(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
-/// Embedded API sidecar (built by scripts/build_sidecar.ps1).
-#[cfg(target_os = "windows")]
+/// Embedded API sidecar (built by scripts/build_sidecar.ps1 or build_sidecar.sh).
+/// One entry per target triple; only the matching one is compiled in.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-x86_64-pc-windows-msvc.exe");
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-aarch64-pc-windows-msvc.exe");
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-aarch64-apple-darwin");
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-x86_64-apple-darwin");
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static SIDECAR_BYTES: &[u8] = include_bytes!("../binaries/sidecar-x86_64-unknown-linux-gnu");
+
+/// File name of the embedded sidecar once extracted to disk.
+#[cfg(target_os = "windows")]
+const SIDECAR_FILE_NAME: &str = "api-sidecar.exe";
+#[cfg(not(target_os = "windows"))]
+const SIDECAR_FILE_NAME: &str = "api-sidecar";
+
+/// Tauri externalBin names, in probe order next to the app binary.
+/// Tauri requires "<name>-<target-triple>"; the bare name is kept for dev.
+const SIDECAR_NAMES: &[&str] = &[
+    "sidecar-x86_64-pc-windows-msvc.exe",
+    "sidecar-aarch64-pc-windows-msvc.exe",
+    "sidecar-aarch64-apple-darwin",
+    "sidecar-x86_64-apple-darwin",
+    "sidecar-x86_64-unknown-linux-gnu",
+    "sidecar.exe",
+    "sidecar",
+];
 
 fn hide_console(cmd: &mut std::process::Command) {
     #[cfg(target_os = "windows")]
@@ -254,28 +296,49 @@ fn hide_console(cmd: &mut std::process::Command) {
 }
 
 fn extract_embedded_sidecar() -> Option<PathBuf> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        None
+    let version = env!("CARGO_PKG_VERSION");
+    // Per-user temp dir so concurrent users never fight over the same file.
+    let base = std::env::temp_dir()
+        .join("workbuddy-tools")
+        .join(sanitize_version(version));
+    let dir = match std::env::var("USER").or_else(|_| std::env::var("USERNAME")) {
+        Ok(u) if !u.trim().is_empty() => base.join(u.trim()),
+        _ => base,
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(SIDECAR_FILE_NAME);
+
+    let want = format!("{:016x}", sidecar_hash(SIDECAR_BYTES));
+    let stamp = dir.join(format!("{SIDECAR_FILE_NAME}.hash"));
+    let ok = path.is_file()
+        && std::fs::read_to_string(&stamp)
+            .map(|s| s.trim() == want)
+            .unwrap_or(false);
+    if !ok {
+        std::fs::write(&path, SIDECAR_BYTES).ok()?;
+        let _ = std::fs::write(&stamp, &want);
     }
-    #[cfg(target_os = "windows")]
+
+    // Non-Windows: the sidecar must be executable or exec fails with EACCES.
+    #[cfg(unix)]
     {
-        let version = env!("CARGO_PKG_VERSION");
-        let dir = std::env::temp_dir().join("workbuddy-tools").join(version);
-        std::fs::create_dir_all(&dir).ok()?;
-        let path = dir.join("api-sidecar.exe");
-        let want = format!("{:016x}", sidecar_hash(SIDECAR_BYTES));
-        let stamp = dir.join("api-sidecar.hash");
-        let ok = path.is_file()
-            && std::fs::read_to_string(&stamp)
-                .map(|s| s.trim() == want)
-                .unwrap_or(false);
-        if !ok {
-            std::fs::write(&path, SIDECAR_BYTES).ok()?;
-            let _ = std::fs::write(&stamp, &want);
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o111 == 0 {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o755));
+            }
         }
-        Some(path)
     }
+
+    Some(path)
+}
+
+/// Keep the version segment safe for use as a path component on every OS.
+fn sanitize_version(v: &str) -> String {
+    v.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect()
 }
 
 fn spawn_sidecar_exe(path: &std::path::Path) -> bool {
@@ -317,18 +380,46 @@ fn start_sidecar() {
             return;
         }
     }
+    // Look next to the app binary. On macOS the real executable sits in
+    // <Bundle>.app/Contents/MacOS, so probe both the binary's own directory and
+    // its "sibling" layout produced by `tauri build --no-bundle`.
+    let mut search_dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in ["sidecar-x86_64-pc-windows-msvc.exe", "sidecar.exe"] {
-                let p = dir.join(name);
-                if p.is_file() && spawn_sidecar_exe(&p) {
-                    eprintln!("[sidecar] sidecar file ready");
-                    return;
-                }
+            search_dirs.extend(sidecar_search_dirs(dir));
+        }
+    }
+    for dir in &search_dirs {
+        for name in SIDECAR_NAMES {
+            let p = dir.join(name);
+            if p.is_file() && spawn_sidecar_exe(&p) {
+                eprintln!("[sidecar] sidecar file ready");
+                return;
             }
         }
     }
     eprintln!("[sidecar] all strategies failed");
+}
+
+/// Directories to probe for a sidecar file, given the app binary's directory.
+///
+/// macOS: the binary lives in <App>.app/Contents/MacOS, so also look at the
+/// bundle root and Contents/Resources to cover both bundled and unbundled
+/// (\`tauri build --no-bundle\`) layouts.
+#[cfg(target_os = "macos")]
+fn sidecar_search_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![dir.to_path_buf()];
+    if let Some(contents) = dir.parent() {
+        out.push(contents.to_path_buf());
+        out.push(contents.join("Resources"));
+        out.push(contents.join("MacOS"));
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sidecar_search_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![dir.to_path_buf()]
 }
 
 #[derive(Debug, Deserialize)]

@@ -5,19 +5,27 @@ import json
 import re
 import shutil
 import sqlite3
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .accounts import discover_uids, get_current_uid
-from .editions import AppPaths, client_looks_running, make_paths, normalize_edition
+from .editions import (
+    AppPaths,
+    client_looks_running,
+    connect_readonly,
+    make_paths,
+    normalize_edition,
+)
 from .models import DEFAULT_MIGRATE_ITEMS, MigrateItemResult, MigrateStatus
 from .safety import (
     AccountNotFound,
     BackupCorrupted,
     BackupNotFound,
     ClientRunningError,
+    DataDirNotWritable,
     MigrationBlocked,
     SafetyError,
     SchemaIncompatible,
@@ -37,6 +45,29 @@ SESSION_SCOPED_ITEMS = {
     "tasks",
     "session_usage",
 }
+
+
+def _write_hint(data_root: Path, err: OSError) -> str:
+    """Turn an OS write failure into a message the user can act on.
+
+    On a normal Mac the WorkBuddy data directory under the user's home
+    (~/.workbuddy / ~/.workbuddy-ai) is not TCC-protected, so a write failure
+    is almost always a plain permission/ownership issue (e.g. the directory is
+    owned by the WorkBuddy client, or a security tool blocks the write). We
+    describe the likely fixes without asserting TCC is to blame.
+    """
+    if sys.platform == "darwin":
+        return (
+            f"无法写入 {data_root}（{err.strerror or '权限不足'}）。"
+            "请先确认该目录归当前用户所有且可写"
+            "（在访达中右键「显示简介」→ 共享与权限）。"
+            "若确认权限无误仍被拒绝，可在「系统设置 → 隐私与安全性 → "
+            "完全磁盘访问权限」中允许本应用后重试。"
+        )
+    return (
+        f"无法写入 {data_root}（{err.strerror or '权限不足'}）。"
+        "请检查该目录的所有权与写入权限后重试。"
+    )
 
 KNOWN_ITEMS = tuple(DEFAULT_MIGRATE_ITEMS.keys())
 
@@ -86,11 +117,7 @@ def _backup_sqlite_db(src_db: Path, dst_db: Path) -> None:
     dst_db.parent.mkdir(parents=True, exist_ok=True)
     src_conn = None
     try:
-        try:
-            src_uri = f"file:{src_db.resolve().as_posix()}?mode=ro"
-            src_conn = sqlite3.connect(src_uri, uri=True)
-        except Exception:
-            src_conn = sqlite3.connect(str(src_db))
+        src_conn = connect_readonly(src_db)
         dst_conn = sqlite3.connect(str(dst_db))
         try:
             with dst_conn:
@@ -110,13 +137,19 @@ def create_backup(paths: AppPaths, target_uid: str, label: str = "migrate") -> s
         )
     target_uid = validate_uid(target_uid)
     label = validate_path_component(label, label="label")
-    paths.backup_root.mkdir(parents=True, exist_ok=True)
+    try:
+        paths.backup_root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise DataDirNotWritable(_write_hint(paths.root, e)) from e
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     rand_suffix = uuid.uuid4().hex[:6]
     tag = f"{stamp}_{label}_{target_uid[:8]}_{rand_suffix}"
     backup_path = paths.backup_root / tag
     ensure_within(paths.backup_root, backup_path)
-    backup_path.mkdir(parents=True, exist_ok=True)
+    try:
+        backup_path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise DataDirNotWritable(_write_hint(paths.root, e)) from e
 
     file_manifests: List[Dict[str, Any]] = []
 
@@ -330,7 +363,8 @@ def validate_minimum_schema(db_path: Path, items: Set[str]) -> None:
         if need_sessions_cols or "session_usage" in items:
             raise SchemaIncompatible("源数据库不存在")
         return
-    conn = sqlite3.connect(str(db_path))
+    # Read-only inspection only: never open the source read-write here.
+    conn = connect_readonly(db_path)
     try:
         cur = conn.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
@@ -457,7 +491,7 @@ def session_ids_for_uid(paths: AppPaths, uid: str, *, strict: bool = False) -> L
             raise SchemaIncompatible("源数据库不存在，无法读取 session 列表")
         return []
     try:
-        conn = sqlite3.connect(str(paths.db_path))
+        conn = connect_readonly(paths.db_path)
         try:
             cur = conn.cursor()
             cur.execute("SELECT id FROM sessions WHERE user_id = ?", (uid,))
@@ -488,9 +522,12 @@ def migrate_sessions(
     if not source.db_path.exists():
         return 0, "源数据库不存在", MigrateStatus.SKIPPED
 
-    conn = sqlite3.connect(str(source.db_path))
+    conn = connect_readonly(source.db_path)
     try:
         cur = conn.cursor()
+        # wal_checkpoint needs write access; on a read-only source it is a
+        # no-op and _checkpoint swallows the error. Reads still see a
+        # consistent snapshot.
         _checkpoint(conn)
         cur.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (source_uid,))
         count = cur.fetchone()[0]
@@ -977,7 +1014,7 @@ def migrate_session_usage(
     if not source.db_path.exists() or not target.db_path.exists() or not session_ids:
         return 0
     id_map = session_id_map or {sid: sid for sid in session_ids}
-    sconn = sqlite3.connect(str(source.db_path))
+    sconn = connect_readonly(source.db_path)
     try:
         scur = sconn.cursor()
         scur.execute(
@@ -1296,7 +1333,7 @@ def list_workspaces(edition: str) -> List[Dict[str, Any]]:
     if not paths.db_path.exists():
         return out
     try:
-        conn = sqlite3.connect(str(paths.db_path))
+        conn = connect_readonly(paths.db_path)
         cur = conn.cursor()
         cur.execute("SELECT cwd, COUNT(*) FROM sessions WHERE cwd IS NOT NULL GROUP BY cwd")
         rows = cur.fetchall()

@@ -9,7 +9,10 @@ on:
 jobs:
   python-tests:
     name: Python Unit Tests
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -25,7 +28,10 @@ jobs:
 
   frontend-build:
     name: Frontend Build
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Node.js
@@ -39,17 +45,55 @@ jobs:
 
   rust-check:
     name: Rust Cargo Check
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Prepare placeholder sidecar and dist for cargo check
-        shell: pwsh
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path src-tauri/binaries
-          Set-Content -Path src-tauri/binaries/sidecar-x86_64-pc-windows-msvc.exe -Value "placeholder"
-          New-Item -ItemType Directory -Force -Path ui/dist
-          Set-Content -Path ui/dist/index.html -Value "<!doctype html><html><body></body></html>"
+          set -euo pipefail
+          mkdir -p src-tauri/binaries ui/dist
+          TRIPLE=$(rustc -vV | sed -n 's/^host: //p')
+          # lib.rs embeds the binary named after the host triple.
+          cp /dev/null "src-tauri/binaries/sidecar-$TRIPLE" 2>/dev/null || true
+          for f in sidecar-x86_64-pc-windows-msvc.exe sidecar-aarch64-pc-windows-msvc.exe sidecar-aarch64-apple-darwin sidecar-x86_64-apple-darwin sidecar-x86_64-unknown-linux-gnu; do
+            printf 'placeholder' > "src-tauri/binaries/$f"
+          done
+          echo '<!doctype html><html><body></body></html>' > ui/dist/index.html
       - name: Cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+  macos-build:
+    name: macOS Bundle Build
+    runs-on: macos-latest
+    needs: [python-tests, frontend-build, rust-check]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install UI dependencies
+        run: npm ci --prefix ui
+      - name: Build sidecar (PyInstaller)
+        run: bash scripts/build_sidecar.sh
+      - name: Build UI
+        run: npm run ui:build
+      - name: Build app bundle
+        run: npx tauri build --bundles app
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkBuddyTools-macOS
+          path: |
+            src-tauri/target/release/bundle/app/
+            src-tauri/target/release/bundle/dmg/

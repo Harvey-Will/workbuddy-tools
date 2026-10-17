@@ -7,7 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .editions import AppPaths, client_looks_running, make_paths, normalize_edition
+from .editions import (
+    AppPaths,
+    client_looks_running,
+    connect_readonly,
+    make_paths,
+    normalize_edition,
+)
 from .models import AccountInfo
 from .safety import (
     ClientRunningError,
@@ -21,7 +27,11 @@ from .safety import (
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(str(db_path))
+    """Read-only: every caller here only inspects rows.
+
+    See editions.connect_readonly for why a plain connect() is wrong on macOS.
+    """
+    return connect_readonly(db_path)
 
 
 def read_account_snapshot(paths: AppPaths) -> Dict[str, str]:

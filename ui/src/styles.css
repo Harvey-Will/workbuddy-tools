@@ -744,10 +744,34 @@ button {
   padding: 0.7rem 0.95rem;
   border-radius: 12px;
   box-shadow: var(--shadow);
-  z-index: 50;
+  /* Must sit above .modal-backdrop (z-index: 100). At the previous value of 50
+     a modal's translucent, blurred backdrop painted over the toast, so the
+     message showed through as unreadable mush. */
+  z-index: 300;
   max-width: 340px;
   font-size: 12.5px;
   font-weight: 500;
+  line-height: 1.45;
+  word-break: break-word;
+  animation: toastIn 0.16s ease-out;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* While a modal is open, move the toast to the top centre: the bottom-right
+   corner sits under the dialog on small windows and is easy to miss.
+   The class is applied by toast() rather than CSS :has() for WKWebView parity. */
+.toast--modal {
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  top: 1.25rem;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 2rem));
+  animation: none;
 }
 
 @media (max-width: 980px) {

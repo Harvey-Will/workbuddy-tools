@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .accounts import list_accounts, load_profiles
-from .editions import AppPaths, client_looks_running, make_paths, normalize_edition
+from .editions import (
+    AppPaths,
+    client_looks_running,
+    connect_readonly,
+    make_paths,
+    normalize_edition,
+)
 from .migrate import (
     _checkpoint,
     migrate_session_content,
@@ -149,7 +155,7 @@ def get_all_session_token_stats(paths: AppPaths) -> Dict[str, Dict[str, Any]]:
     # Check session_usage in sqlite if some sessions lack jsonl token events
     if paths.db_path.exists():
         try:
-            conn = sqlite3.connect(f"file:{paths.db_path.resolve().as_posix()}?mode=ro", uri=True)
+            conn = connect_readonly(paths.db_path)
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='session_usage'")
@@ -231,7 +237,7 @@ def list_sessions(
     # Aggregated token usage for this edition
     token_stats_all = get_all_session_token_stats(paths)
 
-    conn = sqlite3.connect(f"file:{paths.db_path.resolve().as_posix()}?mode=ro", uri=True)
+    conn = connect_readonly(paths.db_path)
     sessions_list: List[Dict[str, Any]] = []
     try:
         cur = conn.cursor()
@@ -405,7 +411,7 @@ def copy_sessions(
     suffix = title_suffix if title_suffix is not None else " (副本)"
 
     # 1. Clone/insert session rows into target DB
-    sconn = sqlite3.connect(str(source.db_path))
+    sconn = connect_readonly(source.db_path)
     try:
         _checkpoint(sconn)
         scur = sconn.cursor()
@@ -590,7 +596,7 @@ def export_session_markdown(
 
     if paths.db_path.exists():
         try:
-            conn = sqlite3.connect(f"file:{paths.db_path.resolve().as_posix()}?mode=ro", uri=True)
+            conn = connect_readonly(paths.db_path)
             try:
                 cur = conn.cursor()
                 cols = _table_column_names(conn, "sessions")
