@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .auth_store import read_auth_account
 from .editions import (
     AppPaths,
     client_looks_running,
@@ -18,6 +19,7 @@ from .models import AccountInfo
 from .safety import (
     ClientRunningError,
     InvalidUID,
+    ReauthenticationRequired,
     WriteConflict,
     atomic_write_json,
     atomic_write_text,
@@ -52,11 +54,24 @@ def read_account_snapshot(paths: AppPaths) -> Dict[str, str]:
         return empty
 
 
-def get_current_uid(paths: AppPaths) -> str:
+def get_current_account(paths: AppPaths) -> Dict[str, str]:
+    """Resolve the real login identity before falling back to legacy hints."""
+    auth = read_auth_account(paths.edition)
+    if auth.status == "ok":
+        return {"uid": auth.uid, "nickname": auth.nickname, "source": "auth"}
+    if auth.status in ("invalid", "unauthenticated"):
+        return {"uid": "", "nickname": "", "source": auth.status}
+
+    # Older clients may only have the startup snapshot. Keep that legacy
+    # fallback, but never let it outrank a verified authentication session.
     snap = read_account_snapshot(paths)
     if snap.get("uid"):
-        return snap["uid"]
-    return db_top_uid(paths)
+        return {"uid": snap["uid"], "nickname": snap.get("nickname", ""), "source": "snapshot"}
+    return {"uid": db_top_uid(paths), "nickname": "", "source": "database"}
+
+
+def get_current_uid(paths: AppPaths) -> str:
+    return get_current_account(paths)["uid"]
 
 
 def db_top_uid(paths: AppPaths) -> str:
@@ -153,6 +168,9 @@ def discover_uids(paths: AppPaths) -> List[str]:
     snap = read_account_snapshot(paths)
     if snap.get("uid"):
         uids.add(snap["uid"])
+    auth = read_auth_account(paths.edition)
+    if auth.status == "ok" and auth.uid:
+        uids.add(auth.uid)
     if paths.storage_dir.exists():
         for d in paths.storage_dir.iterdir():
             if not d.is_dir() or not d.name.startswith("user-"):
@@ -360,8 +378,11 @@ def set_account_label(edition: str, uid: str, label: str) -> Dict[str, Any]:
 def list_accounts(edition: str) -> List[AccountInfo]:
     paths = make_paths(edition)
     seed_nicknames_from_snapshot(paths)
-    current = get_current_uid(paths)
+    current_account = get_current_account(paths)
+    current = current_account["uid"]
     snap = read_account_snapshot(paths)
+    snap_nickname = snap.get("nickname", "") if snap.get("uid") == current else ""
+    current_nickname = current_account.get("nickname") or snap_nickname
     sc = session_counts(paths)
     ms = memory_sizes(paths)
     cs = connector_stats(paths)
@@ -392,7 +413,7 @@ def list_accounts(edition: str) -> List[AccountInfo]:
             paths,
             uid,
             current_uid=current,
-            snap_nickname=snap.get("nickname", ""),
+            snap_nickname=current_nickname,
         )
         out.append(
             AccountInfo(
@@ -415,13 +436,28 @@ def list_accounts(edition: str) -> List[AccountInfo]:
 
 
 def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
-    """Switch current login identity by rewriting account-snapshot.json."""
+    """Synchronize the startup snapshot with an already authenticated account.
+
+    This never edits or fabricates a client authentication session. If the
+    target is not logged in, fail closed and ask the user to sign in natively.
+    """
     paths = make_paths(edition)
     if not paths.root.exists():
         raise FileNotFoundError(f"edition data root missing: {paths.root}")
     target_uid = validate_uid(target_uid)
     if client_looks_running(paths.edition):
         raise ClientRunningError("客户端正在运行，请完全退出 WorkBuddy 后再切换账号")
+
+    auth = read_auth_account(paths.edition)
+    if auth.status == "invalid":
+        raise WriteConflict("客户端认证文件无法解析，未修改任何账号状态")
+    if auth.status != "ok":
+        raise ReauthenticationRequired("未检测到有效登录会话，请先在客户端中登录目标账号")
+    if auth.uid != target_uid:
+        raise ReauthenticationRequired(
+            "目标账号尚未在当前客户端登录。请打开客户端登录该账号并完全退出，刷新后点击「同步快照」"
+        )
+
     known = {a.uid for a in list_accounts(edition)}
     if target_uid not in known:
         # still allow switch to unknown uid (user may add new)
@@ -447,11 +483,17 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
     primary = data.get("primary") or {}
     if not isinstance(primary, dict):
         raise WriteConflict("account-snapshot.json primary 结构异常，已中止切换")
+    if not isinstance(primary.get("version"), int):
+        primary["version"] = 1
+    # Account type belongs to the identity, so never retain the outgoing UID's type.
+    primary["type"] = auth.account_type
     old_uid = primary.get("uid") or ""
     # remember outgoing current nickname, then resolve target display name
     if old_uid and primary.get("nickname"):
         remember_nickname(paths, old_uid, str(primary.get("nickname") or "").strip())
-    nickname = resolve_nickname(paths, target_uid)
+    nickname = auth.nickname or resolve_nickname(
+        paths, target_uid, current_uid=auth.uid, snap_nickname=auth.nickname
+    )
     # never persist auto-fallback names into client snapshot
     snapshot_nick = ""
     cache = load_nickname_cache(paths)
@@ -471,6 +513,10 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
     )
     data["primary"] = primary
     atomic_write_json(snapshot, data)
+    verified_data = json.loads(snapshot.read_text(encoding="utf-8"))
+    verified = verified_data.get("primary") or {}
+    if verified.get("uid") != target_uid or verified.get("type") != auth.account_type:
+        raise WriteConflict("启动快照写入后校验失败，请重试")
     return {
         "ok": True,
         "edition": paths.edition,
@@ -479,7 +525,8 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
         "nickname": nickname,
         "backup_path": backup_path,
         "need_restart": True,
-        "message": f"已切换到「{nickname}」，请完全退出并重启对应 WorkBuddy 客户端",
+        "auth_verified": True,
+        "message": f"已确认「{nickname}」的登录状态并同步启动快照，重启客户端后将继续使用该账号",
     }
 
 

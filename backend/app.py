@@ -44,13 +44,14 @@ from core.safety import (
     DataDirNotWritable,
     InvalidUID,
     MigrationBlocked,
+    ReauthenticationRequired,
     SafetyError,
     SchemaIncompatible,
     UnsafePath,
     WriteConflict,
 )
 
-APP_VERSION = "0.1.5.2"
+APP_VERSION = "0.1.6"
 __version__ = APP_VERSION
 app = FastAPI(title="WorkBuddy Tools", version=APP_VERSION)
 
@@ -174,10 +175,12 @@ def api_accounts(edition: str = Query(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail={"code": "edition_missing", "message": "data directory not found"})
     accounts = [a.to_dict() for a in accounts_mod.list_accounts(ed)]
     profiles = accounts_mod.load_profiles(ed)
+    current = accounts_mod.get_current_account(paths)
     snap = accounts_mod.read_account_snapshot(paths)
     return {
         "edition": ed,
-        "current_uid": snap.get("uid") or accounts_mod.get_current_uid(paths),
+        "current_uid": current["uid"],
+        "snapshot_uid": snap.get("uid", ""),
         "accounts": accounts,
         "profiles": profiles,
         "client_running": client_looks_running(ed),
@@ -188,18 +191,18 @@ def api_accounts(edition: str = Query(...)) -> Dict[str, Any]:
 def api_current(edition: str = Query(...)) -> Dict[str, Any]:
     ed = _norm(edition)
     paths = make_paths(ed)
-    snap = accounts_mod.read_account_snapshot(paths)
+    current = accounts_mod.get_current_account(paths)
     return {
         "edition": ed,
-        "uid": snap.get("uid") or accounts_mod.get_current_uid(paths),
-        "nickname": snap.get("nickname", ""),
+        "uid": current["uid"],
+        "nickname": current.get("nickname", ""),
         "client_running": client_looks_running(ed),
     }
 
 
 def _map_safety(e: SafetyError) -> HTTPException:
     status = 400
-    if isinstance(e, ClientRunningError):
+    if isinstance(e, (ClientRunningError, ReauthenticationRequired)):
         status = 409
     elif isinstance(e, DataDirNotWritable):
         status = 403
@@ -446,8 +449,7 @@ def api_backups_create(body: CreateBackupBody) -> Dict[str, Any]:
         paths = make_paths(ed)
         target_uid = (body.target_uid or "").strip()
         if not target_uid:
-            snap = accounts_mod.read_account_snapshot(paths)
-            target_uid = snap.get("uid") or accounts_mod.get_current_uid(paths) or "default"
+            target_uid = accounts_mod.get_current_uid(paths) or "default"
         label = (body.label or "manual").strip()
         bk_path_str = migrate_mod.create_backup(paths, target_uid=target_uid, label=label)
         bk_path = Path(bk_path_str)

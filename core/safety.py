@@ -36,6 +36,12 @@ class ClientRunningError(SafetyError):
     code = "client_running"
 
 
+class ReauthenticationRequired(SafetyError):
+    """The requested account has no verified session in the desktop client."""
+
+    code = "reauth_required"
+
+
 class MigrationBlocked(SafetyError):
     code = "migration_blocked"
 

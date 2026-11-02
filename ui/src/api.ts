@@ -378,6 +378,7 @@ export const api = {
     return request<{
       edition: string;
       current_uid: string;
+      snapshot_uid: string;
       accounts: AccountInfo[];
       client_running: boolean;
     }>(`/api/accounts?edition=${encodeURIComponent(edition)}`);

@@ -57,6 +57,7 @@ const state = {
   edition: "domestic",
   accounts: [] as AccountInfo[],
   currentUid: "",
+  snapshotUid: "",
   workspaces: [] as WorkspaceInfo[],
   migratePlan: null as MigratePlan | null,
   selectedItems: {} as Record<string, boolean>,
@@ -1533,6 +1534,7 @@ function renderAccounts(): void {
   root.innerHTML = state.accounts
     .map((a) => {
       const current = a.uid === state.currentUid || a.is_current;
+      const needsSnapshotSync = current && !!state.currentUid && state.snapshotUid !== state.currentUid;
       const name = escapeHtml(displayName(a));
       return `
       <div class="card ${current ? "current" : ""}">
@@ -1540,6 +1542,7 @@ function renderAccounts(): void {
         <div class="uid">${escapeHtml(a.uid)}</div>
         <div class="meta">
           <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : "历史账号"}</span>
+          ${needsSnapshotSync ? `<span class="badge warn">快照待同步</span>` : ""}
           <span class="badge soft">${nameSourceLabel(a.name_source)}</span>
         </div>
         <div class="stats">
@@ -1549,7 +1552,7 @@ function renderAccounts(): void {
         </div>
         <div class="muted small">最近活跃 ${fmtTime(a.last_activity_at)}</div>
         <div class="row" style="margin-top:.65rem">
-          ${current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}">切换</button>`}
+          ${needsSnapshotSync ? `<button class="btn primary" data-sync="${escapeHtml(a.uid)}" data-name="${name}">同步快照</button>` : current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}">切换</button>`}
           <button class="btn" data-rename="${escapeHtml(a.uid)}" data-name="${name}">重命名</button>
           <button class="btn ghost" data-src="${escapeHtml(a.uid)}">迁移源</button>
           <button class="btn" data-backup="${escapeHtml(a.uid)}" data-name="${name}" title="管理此账号的快照备份与还原">💾 备份</button>
@@ -1565,6 +1568,19 @@ function renderAccounts(): void {
       try {
         const r = await api.switchAccount(state.edition, uid);
         toast(r.message || "已切换");
+        await loadAccounts();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-sync]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = btn.dataset.sync!;
+      if (!(await confirmAction(`将当前登录账号「${btn.dataset.name}」同步到启动快照？`, "同步账号快照", "同步"))) return;
+      try {
+        const r = await api.switchAccount(state.edition, uid);
+        toast(r.message || "快照已同步");
         await loadAccounts();
       } catch (e) {
         toast((e as Error).message);
@@ -1641,6 +1657,7 @@ async function loadAccounts(): Promise<void> {
   const data = await api.accounts(state.edition);
   state.accounts = data.accounts || [];
   state.currentUid = data.current_uid || "";
+  state.snapshotUid = data.snapshot_uid || "";
   const ed = state.editions.find((e) => e.key === state.edition);
   if (ed) ed.client_running = data.client_running;
   renderAccounts();

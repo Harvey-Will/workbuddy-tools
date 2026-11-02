@@ -222,6 +222,7 @@ class MockStore {
   getAccounts(edition: string): {
     edition: string;
     current_uid: string;
+    snapshot_uid: string;
     accounts: AccountInfo[];
     client_running: boolean;
   } {
@@ -229,6 +230,7 @@ class MockStore {
     return {
       edition,
       current_uid: data.currentUid,
+      snapshot_uid: data.currentUid,
       accounts: JSON.parse(JSON.stringify(data.accounts)) as AccountInfo[],
       client_running: false,
     };
