@@ -28,6 +28,7 @@ class AccountInfo:
     connector_states: int
     is_current: bool
     tasks: int = 0
+    has_stored_session: bool = False
     display_name: str = ""
     name_source: str = "fallback"  # snapshot | cache | profile | fallback
     last_activity_at: Optional[int] = None  # epoch ms

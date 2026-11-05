@@ -25,6 +25,7 @@ export interface AccountInfo {
   connector_states: number;
   is_current: boolean;
   tasks: number;
+  has_stored_session?: boolean;
   last_activity_at?: number | null;
   role?: string;
 }
@@ -389,6 +390,13 @@ export const api = {
       "/api/accounts/switch",
       { method: "POST", body: JSON.stringify({ edition, target_uid }) },
     );
+  },
+  forgetSession: (edition: string, uid: string) => {
+    if (isDemoMode()) return Promise.resolve({ ok: true, removed: false });
+    return request<{ ok: boolean; removed: boolean }>("/api/accounts/forget-session", {
+      method: "POST",
+      body: JSON.stringify({ edition, uid }),
+    });
   },
   rename: (edition: string, uid: string, label: string) => {
     if (isDemoMode()) return Promise.resolve(mockStore.rename(edition, uid, label));

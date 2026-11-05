@@ -1595,7 +1595,7 @@ function renderAccounts(): void {
         <div class="nick" title="${name}">${name}</div>
         <div class="uid">${escapeHtml(a.uid)}</div>
         <div class="meta">
-          <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : "历史数据 · 需重新登录"}</span>
+          <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : a.has_stored_session ? "已加密保存 · 可切换" : "历史数据 · 需重新登录"}</span>
           ${needsSnapshotSync ? `<span class="badge warn">快照待同步</span>` : ""}
           <span class="badge soft">${nameSourceLabel(a.name_source)}</span>
         </div>
@@ -1606,7 +1606,8 @@ function renderAccounts(): void {
         </div>
         <div class="muted small">最近活跃 ${fmtTime(a.last_activity_at)}</div>
         <div class="row" style="margin-top:.65rem">
-          ${needsSnapshotSync ? `<button class="btn primary" data-sync="${escapeHtml(a.uid)}" data-name="${name}">同步快照</button>` : current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}" title="客户端同一时间只支持一个登录账号，切换需要重新登录">登录并切换</button>`}
+          ${needsSnapshotSync ? `<button class="btn primary" data-sync="${escapeHtml(a.uid)}" data-name="${name}">同步快照</button>` : current ? "" : a.has_stored_session ? `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}" title="使用本机 DPAPI 加密保存的登录会话">切换</button>` : `<button class="btn primary" data-login-switch="${escapeHtml(a.uid)}" data-name="${name}" title="登录一次后会自动加密保存，之后可直接切换">登录并切换</button>`}
+          ${!current && a.has_stored_session ? `<button class="btn ghost" data-forget="${escapeHtml(a.uid)}" data-name="${name}" title="删除本机加密保存的登录密钥">清除密钥</button>` : ""}
           <button class="btn" data-rename="${escapeHtml(a.uid)}" data-name="${name}">重命名</button>
           <button class="btn ghost" data-src="${escapeHtml(a.uid)}">迁移源</button>
           <button class="btn" data-backup="${escapeHtml(a.uid)}" data-name="${name}" title="管理此账号的快照备份与还原">💾 备份</button>
@@ -1620,15 +1621,53 @@ function renderAccounts(): void {
       const uid = btn.dataset.switch!;
       const name = btn.dataset.name || "目标账号";
       const ok = await confirmAction(
-        `WorkBuddy 客户端同一时间只保留一个账号的有效登录会话，切换账号需要重新登录。\n\n将打开客户端，请登录「${name}」；登录成功后完全退出客户端，工具会自动完成切换。`,
-        "登录并切换账号",
+        `将使用本机 Windows DPAPI 加密保存的登录会话切换到「${name}」。\n\n请确保客户端已完全退出。切换完成后启动客户端即可。`,
+        "使用已保存密钥切换",
+        "切换",
+      );
+      if (!ok) return;
+      try {
+        const r = await api.switchAccount(state.edition, uid);
+        toast(r.message || "账号已切换");
+        await loadAccounts();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-login-switch]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = btn.dataset.loginSwitch!;
+      const name = btn.dataset.name || "目标账号";
+      const ok = await confirmAction(
+        `该账号尚未保存登录密钥。将打开客户端，请登录「${name}」；登录成功后完全退出客户端，工具会自动加密保存并完成切换。`,
+        "登录并保存账号",
         "打开客户端",
       );
       if (!ok) return;
       try {
         await api.openClient(state.edition);
         startPendingAccountLogin(uid);
-        toast(`已打开客户端。请登录「${name}」，完全退出后将自动完成切换。`);
+        toast(`已打开客户端。请登录「${name}」，完全退出后将自动保存并完成切换。`);
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-forget]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = btn.dataset.forget!;
+      const name = btn.dataset.name || "该账号";
+      const ok = await confirmAction(
+        `删除本机加密保存的「${name}」登录密钥？\n\n删除后该账号需要重新登录一次才能切换。当前客户端的登录状态不受影响。`,
+        "清除账号密钥",
+        "删除",
+      );
+      if (!ok) return;
+      try {
+        const r = await api.forgetSession(state.edition, uid);
+        toast(r.removed ? "已清除该账号密钥" : "该账号没有可清除的密钥");
+        await loadAccounts();
       } catch (e) {
         toast((e as Error).message);
       }

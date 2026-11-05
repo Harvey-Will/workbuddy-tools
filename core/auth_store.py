@@ -65,6 +65,36 @@ def _has_usable_credential(value: object) -> bool:
     return False
 
 
+def parse_auth_session_bytes(raw: bytes) -> AuthAccountState:
+    """Parse session bytes without ever returning credential-value data."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return AuthAccountState(status="invalid")
+    if not isinstance(data, dict):
+        return AuthAccountState(status="invalid")
+    account = data.get("account")
+    auth = data.get("auth")
+    if not isinstance(account, dict) or not isinstance(auth, dict):
+        return AuthAccountState(status="invalid")
+    uid = account.get("uid")
+    nickname = account.get("nickname")
+    account_type = account.get("type")
+    token = auth.get("accessToken")
+    if not isinstance(uid, str) or not uid.strip():
+        return AuthAccountState(status="invalid")
+    if not isinstance(account_type, str) or not account_type.strip():
+        return AuthAccountState(status="invalid")
+    if not _has_usable_credential(token):
+        return AuthAccountState(status="unauthenticated")
+    return AuthAccountState(
+        status="ok",
+        uid=uid.strip(),
+        nickname=nickname.strip() if isinstance(nickname, str) else "",
+        account_type=account_type.strip(),
+    )
+
+
 def read_auth_account(edition: str) -> AuthAccountState:
     """Read only the active account metadata from the real client session.
 
@@ -77,28 +107,6 @@ def read_auth_account(edition: str) -> AuthAccountState:
     if not path.exists():
         return AuthAccountState(status="missing")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return AuthAccountState(status="invalid")
-        account = data.get("account")
-        auth = data.get("auth")
-        if not isinstance(account, dict) or not isinstance(auth, dict):
-            return AuthAccountState(status="invalid")
-        uid = account.get("uid")
-        nickname = account.get("nickname")
-        account_type = account.get("type")
-        token = auth.get("accessToken")
-        if not isinstance(uid, str) or not uid.strip():
-            return AuthAccountState(status="invalid")
-        if not isinstance(account_type, str) or not account_type.strip():
-            return AuthAccountState(status="invalid")
-        if not _has_usable_credential(token):
-            return AuthAccountState(status="unauthenticated")
-        return AuthAccountState(
-            status="ok",
-            uid=uid.strip(),
-            nickname=nickname.strip() if isinstance(nickname, str) else "",
-            account_type=account_type.strip(),
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        return parse_auth_session_bytes(path.read_bytes())
+    except OSError:
         return AuthAccountState(status="invalid")
