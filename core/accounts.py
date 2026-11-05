@@ -455,7 +455,7 @@ def switch_account(edition: str, target_uid: str) -> Dict[str, Any]:
         raise ReauthenticationRequired("未检测到有效登录会话，请先在客户端中登录目标账号")
     if auth.uid != target_uid:
         raise ReauthenticationRequired(
-            "目标账号尚未在当前客户端登录。请打开客户端登录该账号并完全退出，刷新后点击「同步快照」"
+            "客户端同一时间只保留一个账号的有效登录会话。请在客户端重新登录目标账号并完全退出，工具会自动同步"
         )
 
     known = {a.uid for a in list_accounts(edition)}

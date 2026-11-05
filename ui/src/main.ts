@@ -58,6 +58,9 @@ const state = {
   accounts: [] as AccountInfo[],
   currentUid: "",
   snapshotUid: "",
+  pendingLoginUid: "",
+  pendingLoginTimer: null as number | null,
+  pendingLoginDeadline: null as number | null,
   workspaces: [] as WorkspaceInfo[],
   migratePlan: null as MigratePlan | null,
   selectedItems: {} as Record<string, boolean>,
@@ -1525,6 +1528,57 @@ function renderPill(): void {
   }
 }
 
+function cancelPendingLogin(): void {
+  if (state.pendingLoginTimer !== null) {
+    window.clearTimeout(state.pendingLoginTimer);
+  }
+  state.pendingLoginTimer = null;
+  state.pendingLoginDeadline = null;
+  state.pendingLoginUid = "";
+}
+
+function schedulePendingLoginCheck(): void {
+  state.pendingLoginTimer = window.setTimeout(() => {
+    void checkPendingLogin();
+  }, 2500);
+}
+
+async function checkPendingLogin(): Promise<void> {
+  const uid = state.pendingLoginUid;
+  const edition = state.edition;
+  if (!uid || !edition) return;
+  if (state.pendingLoginDeadline !== null && Date.now() > state.pendingLoginDeadline) {
+    cancelPendingLogin();
+    toast("未检测到目标账号完成登录。可稍后刷新账号列表手动查看。");
+    return;
+  }
+  try {
+    const data = await api.accounts(edition);
+    if (!state.pendingLoginUid || state.pendingLoginUid !== uid || state.edition !== edition) return;
+    if (data.current_uid === uid && !data.client_running) {
+      cancelPendingLogin();
+      try {
+        const r = await api.switchAccount(edition, uid);
+        toast(r.message || "账号已切换");
+        await loadAccounts();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+      return;
+    }
+  } catch {
+    // Client may be replacing its auth file; retry until the deadline.
+  }
+  schedulePendingLoginCheck();
+}
+
+function startPendingAccountLogin(uid: string): void {
+  cancelPendingLogin();
+  state.pendingLoginUid = uid;
+  state.pendingLoginDeadline = Date.now() + 15 * 60 * 1000;
+  schedulePendingLoginCheck();
+}
+
 function renderAccounts(): void {
   const root = $("#account-cards");
   if (!state.accounts.length) {
@@ -1541,7 +1595,7 @@ function renderAccounts(): void {
         <div class="nick" title="${name}">${name}</div>
         <div class="uid">${escapeHtml(a.uid)}</div>
         <div class="meta">
-          <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : "历史账号"}</span>
+          <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : "历史数据 · 需重新登录"}</span>
           ${needsSnapshotSync ? `<span class="badge warn">快照待同步</span>` : ""}
           <span class="badge soft">${nameSourceLabel(a.name_source)}</span>
         </div>
@@ -1552,7 +1606,7 @@ function renderAccounts(): void {
         </div>
         <div class="muted small">最近活跃 ${fmtTime(a.last_activity_at)}</div>
         <div class="row" style="margin-top:.65rem">
-          ${needsSnapshotSync ? `<button class="btn primary" data-sync="${escapeHtml(a.uid)}" data-name="${name}">同步快照</button>` : current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}">切换</button>`}
+          ${needsSnapshotSync ? `<button class="btn primary" data-sync="${escapeHtml(a.uid)}" data-name="${name}">同步快照</button>` : current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}" title="客户端同一时间只支持一个登录账号，切换需要重新登录">登录并切换</button>`}
           <button class="btn" data-rename="${escapeHtml(a.uid)}" data-name="${name}">重命名</button>
           <button class="btn ghost" data-src="${escapeHtml(a.uid)}">迁移源</button>
           <button class="btn" data-backup="${escapeHtml(a.uid)}" data-name="${name}" title="管理此账号的快照备份与还原">💾 备份</button>
@@ -1564,11 +1618,17 @@ function renderAccounts(): void {
   root.querySelectorAll<HTMLElement>("[data-switch]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const uid = btn.dataset.switch!;
-      if (!(await confirmAction(`切换到「${btn.dataset.name}」？切换后请重启客户端。`, "确认切换账号", "切换"))) return;
+      const name = btn.dataset.name || "目标账号";
+      const ok = await confirmAction(
+        `WorkBuddy 客户端同一时间只保留一个账号的有效登录会话，切换账号需要重新登录。\n\n将打开客户端，请登录「${name}」；登录成功后完全退出客户端，工具会自动完成切换。`,
+        "登录并切换账号",
+        "打开客户端",
+      );
+      if (!ok) return;
       try {
-        const r = await api.switchAccount(state.edition, uid);
-        toast(r.message || "已切换");
-        await loadAccounts();
+        await api.openClient(state.edition);
+        startPendingAccountLogin(uid);
+        toast(`已打开客户端。请登录「${name}」，完全退出后将自动完成切换。`);
       } catch (e) {
         toast((e as Error).message);
       }
@@ -3009,6 +3069,7 @@ function bind(): void {
     }
   });
   ($("#edition-select") as HTMLSelectElement).addEventListener("change", async (e) => {
+    cancelPendingLogin();
     state.edition = (e.target as HTMLSelectElement).value;
     state.backupsEdition = state.edition;
     state.sessionsEdition = state.edition;
