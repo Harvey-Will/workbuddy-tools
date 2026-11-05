@@ -36,6 +36,12 @@ class ClientRunningError(SafetyError):
     code = "client_running"
 
 
+class ReauthenticationRequired(SafetyError):
+    """The requested account has no verified session in the desktop client."""
+
+    code = "reauth_required"
+
+
 class MigrationBlocked(SafetyError):
     code = "migration_blocked"
 
@@ -46,6 +52,12 @@ class SchemaIncompatible(SafetyError):
 
 class WriteConflict(SafetyError):
     code = "write_conflict"
+
+
+class VaultUnavailable(SafetyError):
+    """The OS-bound credential protector is unavailable on this platform."""
+
+    code = "vault_unavailable"
 
 
 class BackupNotFound(SafetyError):
@@ -121,10 +133,14 @@ def safe_join(root: Path, *parts: str) -> Path:
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    atomic_write_bytes(path, content.encode(encoding))
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp")
-    with open(tmp, "w", encoding=encoding, newline="") as f:
+    with open(tmp, "wb") as f:
         f.write(content)
         f.flush()
         os.fsync(f.fileno())

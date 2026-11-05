@@ -1,6 +1,6 @@
 # WorkBuddy Tools 发布说明
 
-- 当前版本：**v0.1.5.2**
+- 当前版本：**v0.1.7**
 - 运行平台：Windows 10 / 11 (x86_64) & macOS 11.0+ (Apple Silicon / Intel)
 - 软件形态：单文件绿色免安装便携版（开箱即用，内置完整独立运行时）
 - 完整更新日志与多版本演进历程：详见 [CHANGELOG.md](CHANGELOG.md)
@@ -25,9 +25,9 @@ powershell -ExecutionPolicy Bypass -File scripts/build_portable.ps1
 
 ---
 
-## v0.1.5.2 发行校验清单
+## v0.1.7 发行校验清单
 
 | 文件名 | 文件大小 | SHA256 校验码 |
 | :--- | :--- | :--- |
-| `workbuddy-tools.exe` | 17.87 MB | `2c048cb58ce33a7180e4e87ba0373e0115ef8ec367f2537a4b8194fa1f193275` |
-| `WorkBuddyTools-portable-win64.zip` | 15.93 MB | `8f91fdbdce8bd360933003ab090214870bb8bea95bc289895dcd618aef96b676` |
+| `workbuddy-tools.exe` | 17.88 MB | `0b8631185963b8fb794e2bae33672ad8c578c4f7a2add9901aa5a9fb902f5049` |
+| `WorkBuddyTools-portable-win64-v0.1.7.zip` | 15.94 MB | `2991c60c863cfc835ec59d414081f70fbfa28a031c4e6340bac96f6a26f3dfd8` |

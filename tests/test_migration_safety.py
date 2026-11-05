@@ -100,7 +100,10 @@ class SafetyCase(unittest.TestCase):
         self.home = Path(self._tmp.name) / "home"
         self.home.mkdir(parents=True)
         self._old_env = os.environ.get("WBT_DATA_HOME")
+        self._old_auth_env = os.environ.get("WBT_AUTH_HOME")
         os.environ["WBT_DATA_HOME"] = str(self.home)
+        # Never read the developer's real client credentials in safety tests.
+        os.environ["WBT_AUTH_HOME"] = str(Path(self._tmp.name) / "missing-auth-root")
         real_home = Path.home().resolve()
         from core.editions import data_home
 
@@ -122,6 +125,10 @@ class SafetyCase(unittest.TestCase):
             os.environ.pop("WBT_DATA_HOME", None)
         else:
             os.environ["WBT_DATA_HOME"] = self._old_env
+        if self._old_auth_env is None:
+            os.environ.pop("WBT_AUTH_HOME", None)
+        else:
+            os.environ["WBT_AUTH_HOME"] = self._old_auth_env
         self._tmp.cleanup()
 
     def patch_running(self, mod, fn) -> None:
@@ -643,30 +650,42 @@ class TestSwitch(SafetyCase):
     def test_switch_malformed_snapshot_preserved(self):
         self.same_edition()
         from core import accounts as accounts_mod
+        from core.auth_store import auth_session_path
         from core.safety import WriteConflict
 
         self.patch_running(accounts_mod, lambda e: False)
-        snap = self.home / ".workbuddy" / "storage" / "skeleton" / "account-snapshot.json"
-        snap.write_text("{not-json", encoding="utf-8")
-        before = snap.read_bytes()
-        with self.assertRaises(WriteConflict):
-            accounts_mod.switch_account("domestic", UID_B)
-        self.assertEqual(snap.read_bytes(), before)
+        old_auth_home = os.environ.get("WBT_AUTH_HOME")
+        os.environ["WBT_AUTH_HOME"] = str(Path(self._tmp.name) / "auth-root")
+        try:
+            auth = auth_session_path("domestic")
+            auth.parent.mkdir(parents=True, exist_ok=True)
+            auth.write_text(
+                json.dumps({"account": {"uid": UID_B, "nickname": "Target", "type": "personal"}, "auth": {"accessToken": "synthetic"}}),
+                encoding="utf-8",
+            )
+            snap = self.home / ".workbuddy" / "storage" / "skeleton" / "account-snapshot.json"
+            snap.write_text("{not-json", encoding="utf-8")
+            before = snap.read_bytes()
+            with self.assertRaises(WriteConflict):
+                accounts_mod.switch_account("domestic", UID_B)
+            self.assertEqual(snap.read_bytes(), before)
+        finally:
+            if old_auth_home is None:
+                os.environ.pop("WBT_AUTH_HOME", None)
+            else:
+                os.environ["WBT_AUTH_HOME"] = old_auth_home
 
-    def test_switch_happy_path(self):
+    def test_switch_requires_verified_auth(self):
         self.same_edition()
         from core import accounts as accounts_mod
+        from core.safety import ReauthenticationRequired
 
         self.patch_running(accounts_mod, lambda e: False)
-        result = accounts_mod.switch_account("domestic", UID_B)
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["new_uid"], UID_B)
-        data = json.loads(
-            (self.home / ".workbuddy" / "storage" / "skeleton" / "account-snapshot.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertEqual(data["primary"]["uid"], UID_B)
+        snap = self.home / ".workbuddy" / "storage" / "skeleton" / "account-snapshot.json"
+        before = snap.read_bytes()
+        with self.assertRaises(ReauthenticationRequired):
+            accounts_mod.switch_account("domestic", UID_B)
+        self.assertEqual(snap.read_bytes(), before)
 
 
 class TestAtomicWrite(unittest.TestCase):

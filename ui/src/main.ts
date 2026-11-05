@@ -57,6 +57,10 @@ const state = {
   edition: "domestic",
   accounts: [] as AccountInfo[],
   currentUid: "",
+  snapshotUid: "",
+  pendingLoginUid: "",
+  pendingLoginTimer: null as number | null,
+  pendingLoginDeadline: null as number | null,
   workspaces: [] as WorkspaceInfo[],
   migratePlan: null as MigratePlan | null,
   selectedItems: {} as Record<string, boolean>,
@@ -1524,6 +1528,57 @@ function renderPill(): void {
   }
 }
 
+function cancelPendingLogin(): void {
+  if (state.pendingLoginTimer !== null) {
+    window.clearTimeout(state.pendingLoginTimer);
+  }
+  state.pendingLoginTimer = null;
+  state.pendingLoginDeadline = null;
+  state.pendingLoginUid = "";
+}
+
+function schedulePendingLoginCheck(): void {
+  state.pendingLoginTimer = window.setTimeout(() => {
+    void checkPendingLogin();
+  }, 2500);
+}
+
+async function checkPendingLogin(): Promise<void> {
+  const uid = state.pendingLoginUid;
+  const edition = state.edition;
+  if (!uid || !edition) return;
+  if (state.pendingLoginDeadline !== null && Date.now() > state.pendingLoginDeadline) {
+    cancelPendingLogin();
+    toast("未检测到目标账号完成登录。可稍后刷新账号列表手动查看。");
+    return;
+  }
+  try {
+    const data = await api.accounts(edition);
+    if (!state.pendingLoginUid || state.pendingLoginUid !== uid || state.edition !== edition) return;
+    if (data.current_uid === uid && !data.client_running) {
+      cancelPendingLogin();
+      try {
+        const r = await api.switchAccount(edition, uid);
+        toast(r.message || "账号已切换");
+        await loadAccounts();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+      return;
+    }
+  } catch {
+    // Client may be replacing its auth file; retry until the deadline.
+  }
+  schedulePendingLoginCheck();
+}
+
+function startPendingAccountLogin(uid: string): void {
+  cancelPendingLogin();
+  state.pendingLoginUid = uid;
+  state.pendingLoginDeadline = Date.now() + 15 * 60 * 1000;
+  schedulePendingLoginCheck();
+}
+
 function renderAccounts(): void {
   const root = $("#account-cards");
   if (!state.accounts.length) {
@@ -1533,13 +1588,15 @@ function renderAccounts(): void {
   root.innerHTML = state.accounts
     .map((a) => {
       const current = a.uid === state.currentUid || a.is_current;
+      const needsSnapshotSync = current && !!state.currentUid && state.snapshotUid !== state.currentUid;
       const name = escapeHtml(displayName(a));
       return `
       <div class="card ${current ? "current" : ""}">
         <div class="nick" title="${name}">${name}</div>
         <div class="uid">${escapeHtml(a.uid)}</div>
         <div class="meta">
-          <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : "历史账号"}</span>
+          <span class="badge ${current ? "ok" : ""}">${current ? "当前登录" : a.has_stored_session ? "已加密保存 · 可切换" : "历史数据 · 需重新登录"}</span>
+          ${needsSnapshotSync ? `<span class="badge warn">快照待同步</span>` : ""}
           <span class="badge soft">${nameSourceLabel(a.name_source)}</span>
         </div>
         <div class="stats">
@@ -1549,7 +1606,8 @@ function renderAccounts(): void {
         </div>
         <div class="muted small">最近活跃 ${fmtTime(a.last_activity_at)}</div>
         <div class="row" style="margin-top:.65rem">
-          ${current ? "" : `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}">切换</button>`}
+          ${needsSnapshotSync ? `<button class="btn primary" data-sync="${escapeHtml(a.uid)}" data-name="${name}">同步快照</button>` : current ? "" : a.has_stored_session ? `<button class="btn primary" data-switch="${escapeHtml(a.uid)}" data-name="${name}" title="使用本机 DPAPI 加密保存的登录会话">切换</button>` : `<button class="btn primary" data-login-switch="${escapeHtml(a.uid)}" data-name="${name}" title="登录一次后会自动加密保存，之后可直接切换">登录并切换</button>`}
+          ${!current && a.has_stored_session ? `<button class="btn ghost" data-forget="${escapeHtml(a.uid)}" data-name="${name}" title="删除本机加密保存的登录密钥">清除密钥</button>` : ""}
           <button class="btn" data-rename="${escapeHtml(a.uid)}" data-name="${name}">重命名</button>
           <button class="btn ghost" data-src="${escapeHtml(a.uid)}">迁移源</button>
           <button class="btn" data-backup="${escapeHtml(a.uid)}" data-name="${name}" title="管理此账号的快照备份与还原">💾 备份</button>
@@ -1561,10 +1619,67 @@ function renderAccounts(): void {
   root.querySelectorAll<HTMLElement>("[data-switch]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const uid = btn.dataset.switch!;
-      if (!(await confirmAction(`切换到「${btn.dataset.name}」？切换后请重启客户端。`, "确认切换账号", "切换"))) return;
+      const name = btn.dataset.name || "目标账号";
+      const ok = await confirmAction(
+        `将使用本机 Windows DPAPI 加密保存的登录会话切换到「${name}」。\n\n请确保客户端已完全退出。切换完成后启动客户端即可。`,
+        "使用已保存密钥切换",
+        "切换",
+      );
+      if (!ok) return;
       try {
         const r = await api.switchAccount(state.edition, uid);
-        toast(r.message || "已切换");
+        toast(r.message || "账号已切换");
+        await loadAccounts();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-login-switch]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = btn.dataset.loginSwitch!;
+      const name = btn.dataset.name || "目标账号";
+      const ok = await confirmAction(
+        `该账号尚未保存登录密钥。将打开客户端，请登录「${name}」；登录成功后完全退出客户端，工具会自动加密保存并完成切换。`,
+        "登录并保存账号",
+        "打开客户端",
+      );
+      if (!ok) return;
+      try {
+        await api.openClient(state.edition);
+        startPendingAccountLogin(uid);
+        toast(`已打开客户端。请登录「${name}」，完全退出后将自动保存并完成切换。`);
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-forget]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = btn.dataset.forget!;
+      const name = btn.dataset.name || "该账号";
+      const ok = await confirmAction(
+        `删除本机加密保存的「${name}」登录密钥？\n\n删除后该账号需要重新登录一次才能切换。当前客户端的登录状态不受影响。`,
+        "清除账号密钥",
+        "删除",
+      );
+      if (!ok) return;
+      try {
+        const r = await api.forgetSession(state.edition, uid);
+        toast(r.removed ? "已清除该账号密钥" : "该账号没有可清除的密钥");
+        await loadAccounts();
+      } catch (e) {
+        toast((e as Error).message);
+      }
+    });
+  });
+  root.querySelectorAll<HTMLElement>("[data-sync]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const uid = btn.dataset.sync!;
+      if (!(await confirmAction(`将当前登录账号「${btn.dataset.name}」同步到启动快照？`, "同步账号快照", "同步"))) return;
+      try {
+        const r = await api.switchAccount(state.edition, uid);
+        toast(r.message || "快照已同步");
         await loadAccounts();
       } catch (e) {
         toast((e as Error).message);
@@ -1641,6 +1756,7 @@ async function loadAccounts(): Promise<void> {
   const data = await api.accounts(state.edition);
   state.accounts = data.accounts || [];
   state.currentUid = data.current_uid || "";
+  state.snapshotUid = data.snapshot_uid || "";
   const ed = state.editions.find((e) => e.key === state.edition);
   if (ed) ed.client_running = data.client_running;
   renderAccounts();
@@ -2992,6 +3108,7 @@ function bind(): void {
     }
   });
   ($("#edition-select") as HTMLSelectElement).addEventListener("change", async (e) => {
+    cancelPendingLogin();
     state.edition = (e.target as HTMLSelectElement).value;
     state.backupsEdition = state.edition;
     state.sessionsEdition = state.edition;
